@@ -107,4 +107,4 @@ screenshots and memory reads from a real (modded) console over XBDM.
 - AMD FidelityFX SDK (MIT); NVIDIA DLSS SDK (its own licence, only with `REGPU_DLSS`); Microsoft's
   `d3dcompiler_47.dll` (Windows SDK redistributable).
 
-ReGPU's own licence has not been chosen yet. Until it is, all rights are reserved.
+ReGPU is released under the [MIT licence](LICENSE).
