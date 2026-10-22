@@ -186,6 +186,39 @@ GUEST_EXPORT(RtlUnicodeToMultiByteN)
     Return(ctx, X_STATUS_SUCCESS);
 }
 
+GUEST_EXPORT(RtlCompareStringN)
+{
+    // (String1, Length1, String2, Length2, CaseInSensitive)
+    const uint32_t s1 = ctx.r3.u32, len1 = ctx.r4.u32;
+    const uint32_t s2 = ctx.r5.u32, len2 = ctx.r6.u32;
+    const bool caseInsensitive = ctx.r7.u32 != 0;
+    const uint32_t len = std::min(len1, len2);
+    int res = 0;
+    if (caseInsensitive)
+    {
+        for (uint32_t i = 0; i < len; i++)
+        {
+            const char c1 = std::tolower((unsigned char)*GuestPtr<char>(s1 + i));
+            const char c2 = std::tolower((unsigned char)*GuestPtr<char>(s2 + i));
+            if (c1 != c2)
+            {
+                res = (unsigned char)c1 - (unsigned char)c2;
+                break;
+            }
+        }
+    }
+    else
+    {
+        res = memcmp(GuestPtr(s1), GuestPtr(s2), len);
+    }
+    if (res == 0)
+    {
+        if (len1 < len2) res = -1;
+        else if (len1 > len2) res = 1;
+    }
+    Return(ctx, res);
+}
+
 GUEST_EXPORT(RtlCompareMemoryUlong)
 {
     const uint32_t src = ctx.r3.u32, length = ctx.r4.u32, pattern = ctx.r5.u32;

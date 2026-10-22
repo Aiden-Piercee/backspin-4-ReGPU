@@ -322,6 +322,26 @@ GUEST_EXPORT(KeRaiseIrqlToDpcLevel)
 
 GUEST_EXPORT(KfLowerIrql) {}
 
+GUEST_EXPORT(KeInitializeDpc)
+{
+    // (KDPC* dpc, void* routine, void* context)
+    const uint32_t dpc = ctx.r3.u32;
+    const uint32_t routine = ctx.r4.u32;
+    const uint32_t context = ctx.r5.u32;
+    if (dpc)
+    {
+        StoreBE16(dpc, 0x13);
+        StoreBE32(dpc + 12, routine);
+        StoreBE32(dpc + 16, context);
+    }
+}
+
+GUEST_EXPORT(KeInsertQueueDpc)
+{
+    // (KDPC* dpc, void* sysArg1, void* sysArg2)
+    Return(ctx, 1);
+}
+
 // Interlocked SLists. SLIST_HEADER is one big-endian 64-bit word:
 // Next (32) | Depth (16) | Sequence (16). The title pushes inline with
 // ldarx/stdcx, so pops must be 64-bit compare-and-swaps on the same word.
@@ -820,6 +840,7 @@ GUEST_EXPORT(ExGetXConfigSetting)
     case 0x0003000A: value = 0x00040000; break; // user: video flags (widescreen)
     case 0x00020002: value = 0x00800000; break; // console: AV region
     case 0x00030007: value = 0; break;          // user: retail flags
+    case 0x0003000E: value = 1; break;          // user: audio flags (digital/stereo)
     default:
         LOG_ONCE("ExGetXConfigSetting: unknown setting %04X/%04X, returning 0", category, setting);
         break;

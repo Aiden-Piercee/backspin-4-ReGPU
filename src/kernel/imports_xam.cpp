@@ -728,6 +728,12 @@ GUEST_EXPORT(XamInputSetState)
     Return(ctx, X_ERROR_SUCCESS);
 }
 
+GUEST_EXPORT(XamInputGetKeystrokeEx)
+{
+    // (user, flags, pKeystroke)
+    Return(ctx, 4306); // ERROR_EMPTY
+}
+
 // Content packages (saves) --------------------------------------------------------------
 
 GUEST_EXPORT(XamContentCreateEx)

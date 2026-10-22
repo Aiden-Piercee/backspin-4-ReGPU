@@ -140,13 +140,14 @@ GUEST_EXPORT(XexGetModuleHandle)
 {
     // (name, handle*)
     const std::string name = GuestString(ctx.r3.u32);
-    if (name.empty() || name == "default.xex")
+    uint32_t ldr = GetModuleHandleByName(name);
+    if (ldr)
     {
-        StoreBE32(ctx.r4.u32, g_title.ldrEntry);
+        StoreBE32(ctx.r4.u32, ldr);
         Return(ctx, X_STATUS_SUCCESS);
         return;
     }
-    Log("XexGetModuleHandle(\"%s\"): module not available", name.c_str());
+    Log("XexGetModuleHandle(\"%s\"): not found", name.c_str());
     StoreBE32(ctx.r4.u32, 0);
     Return(ctx, X_STATUS_NO_SUCH_FILE);
 }
@@ -178,7 +179,51 @@ GUEST_EXPORT(XexGetModuleSection)
 
 GUEST_EXPORT(XexGetProcedureAddress)
 {
-    Log("XexGetProcedureAddress(%08X, %u): not supported", ctx.r3.u32, ctx.r4.u32);
-    StoreIfNonNull(ctx.r5.u32, 0);
-    Return(ctx, X_STATUS_NOT_SUPPORTED);
+    const uint32_t hModule = ctx.r3.u32;
+    const uint32_t ordinal = ctx.r4.u32;
+    const uint32_t outAddress = ctx.r5.u32;
+    uint32_t addr = GetModuleProcAddress(hModule, ordinal);
+    if (!addr)
+    {
+        Log("XexGetProcedureAddress(%08X, %u): not found", hModule, ordinal);
+        StoreIfNonNull(outAddress, 0);
+        Return(ctx, X_STATUS_PROCEDURE_NOT_FOUND);
+        return;
+    }
+    StoreBE32(outAddress, addr);
+    Return(ctx, X_STATUS_SUCCESS);
+}
+
+GUEST_EXPORT(XexLoadImage)
+{
+    // (szXexName, dwFlags, dwMinimumVersion, phModuleHandle)
+    const std::string name = GuestString(ctx.r3.u32);
+    const uint32_t flags = ctx.r4.u32;
+    const uint32_t minVersion = ctx.r5.u32;
+    const uint32_t outHandle = ctx.r6.u32;
+    Log("XexLoadImage(\"%s\", flags=%X, minVer=%u)", name.c_str(), flags, minVersion);
+    uint32_t ldr = LoadModuleImage(name);
+    if (!ldr)
+    {
+        Log("XexLoadImage failed for \"%s\"", name.c_str());
+        StoreIfNonNull(outHandle, 0);
+        Return(ctx, X_STATUS_NO_SUCH_FILE);
+        return;
+    }
+
+    LoadedModule* mod = FindLoadedModule(ldr);
+    if (mod && !mod->initialized)
+    {
+        InitModule(*mod, ctx, base);
+    }
+
+    StoreBE32(outHandle, ldr);
+    Return(ctx, X_STATUS_SUCCESS);
+}
+
+GUEST_EXPORT(XexUnloadImage)
+{
+    const uint32_t ldr = ctx.r3.u32;
+    Log("XexUnloadImage(%08X)", ldr);
+    Return(ctx, X_STATUS_SUCCESS);
 }

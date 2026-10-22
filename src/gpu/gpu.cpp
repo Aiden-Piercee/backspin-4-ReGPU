@@ -458,15 +458,14 @@ void DispatchInterrupt(PPCContext& ctx, uint32_t source, uint32_t cpu)
         return;
     // The handler acknowledges by clearing the bit of the CPU it runs on,
     // read from the PCR; it runs with that CPU's interrupts disabled.
-    const regpu::Host& host = regpu::GetHost();
-    *GuestPtr<uint8_t>(host.currentPcr() + kpcr::CurrentCpu) = uint8_t(cpu);
-    host.interruptLockAcquire(int(cpu));
+    *GuestPtr<uint8_t>(CurrentGuestThread()->pcr + kpcr::CurrentCpu) = uint8_t(cpu);
+    InterruptLockAcquire(int(cpu));
     ctx.msr &= ~0x8000ull;
     ctx.r3.u64 = source;
     ctx.r4.u64 = g_gpu.interruptData;
-    host.guestCall(ctx, callback);
+    GuestCall(ctx, callback);
     ctx.msr |= 0x8000;
-    host.interruptLockRelease();
+    InterruptLockRelease();
 }
 
 // Vblank callbacks run on a guest thread of their own, like the console's
@@ -1257,8 +1256,8 @@ void GpuStartInterruptThread()
     if (g_gpu.interruptThread)
         return;
     g_gpu.interruptThread = true;
-    regpu::GetHost().createThread("gpu vblank irq", InterruptLoop);
-    regpu::GetHost().createThread("gpu command processor", CommandProcessorLoop);
+    CreateHostGuestThread("gpu vblank irq", InterruptLoop);
+    CreateHostGuestThread("gpu command processor", CommandProcessorLoop);
 }
 
 uint64_t GpuSwapCount() { return g_gpu.swaps; }

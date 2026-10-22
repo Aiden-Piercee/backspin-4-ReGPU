@@ -26,6 +26,25 @@ void LoadTitle(const std::filesystem::path& xexPath);
 // Where the title update lives (the console's update: device): default.xexp, Media.zip.
 // FM2_TITLE_UPDATE_DIR overrides <user>\fm2\update.
 const std::filesystem::path& TitleUpdateDir();
-
 // Optional header value (low byte 0x00/0x01) or guest pointer to its data.
 uint32_t XexHeaderField(uint32_t headerBase, uint32_t key);
+
+struct LoadedModule
+{
+    std::string name;
+    uint32_t base = 0;
+    uint32_t size = 0;
+    uint32_t entryPoint = 0;
+    uint32_t xexHeader = 0;
+    uint32_t ldrEntry = 0;
+    uint32_t exportTable = 0;
+    bool initialized = false;
+};
+
+struct PPCContext;
+uint32_t LoadModuleImage(const std::string& name);
+LoadedModule* FindLoadedModule(uint32_t ldrEntry);
+LoadedModule* FindLoadedModuleByName(const std::string& name);
+uint32_t GetModuleHandleByName(const std::string& name);
+uint32_t GetModuleProcAddress(uint32_t ldrEntry, uint32_t ordinal);
+void InitModule(LoadedModule& mod, PPCContext& ctx, uint8_t* base);

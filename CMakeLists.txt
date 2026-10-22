@@ -62,7 +62,7 @@ target_include_directories(topspin4 PRIVATE
     thirdparty/XenonRecomp/thirdparty/simde
 )
 target_compile_definitions(topspin4 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
-target_compile_options(topspin4 PRIVATE -msse4.1 -fno-strict-aliasing -gline-tables-only ${PPC_FORCE_INCLUDE})
+target_compile_options(topspin4 PRIVATE /EHsc -msse4.1 -fno-strict-aliasing -gline-tables-only ${PPC_FORCE_INCLUDE})
 target_link_options(topspin4 PRIVATE /STACK:0x1000000 /DEBUG)
 
 target_link_libraries(topspin4 PRIVATE

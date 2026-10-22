@@ -7,10 +7,6 @@ void AudioNoteMusicRead(const std::filesystem::path& file, uint64_t offset, cons
 {
 }
 
-void AudioInit()
-{
-}
-
 bool RunLauncher()
 {
     return true; // Proceed directly to game startup

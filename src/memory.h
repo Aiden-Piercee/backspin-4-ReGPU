@@ -64,6 +64,8 @@ struct be
     T get() const { return Swap(raw); }
 };
 
+inline uint16_t LoadBE16(uint32_t address) { return __builtin_bswap16(*GuestPtr<uint16_t>(address)); }
+inline void StoreBE16(uint32_t address, uint16_t v) { *GuestPtr<uint16_t>(address) = __builtin_bswap16(v); }
 inline uint32_t LoadBE32(uint32_t address) { return __builtin_bswap32(*GuestPtr<uint32_t>(address)); }
 inline void StoreBE32(uint32_t address, uint32_t v) { *GuestPtr<uint32_t>(address) = __builtin_bswap32(v); }
 inline uint64_t LoadBE64(uint32_t address) { return __builtin_bswap64(*GuestPtr<uint64_t>(address)); }

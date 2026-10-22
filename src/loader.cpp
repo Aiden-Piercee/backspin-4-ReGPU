@@ -18,6 +18,8 @@
 #include "user_dir.h"
 
 LoadedTitle g_title;
+static std::vector<LoadedModule> g_loadedModules;
+static std::filesystem::path g_gameTitleDir;
 
 namespace
 {
@@ -296,4 +298,222 @@ void LoadTitle(const std::filesystem::path& xexPath)
 
     Log("loader: %s title %08X entry %08X stack %#x tls %u slots + %#x bytes @%08X", xexPath.string().c_str(),
         g_title.titleId, g_title.entryPoint, g_title.stackSize, g_title.tlsSlotCount, g_title.tlsDataSize, g_title.tlsTemplate);
+
+    g_gameTitleDir = xexPath.parent_path();
+    LoadedModule defaultMod;
+    defaultMod.name = "default.xex";
+    defaultMod.base = uint32_t(image.base);
+    defaultMod.size = image.size;
+    defaultMod.entryPoint = g_title.entryPoint;
+    defaultMod.xexHeader = g_title.xexHeader;
+    defaultMod.ldrEntry = g_title.ldrEntry;
+    defaultMod.exportTable = 0;
+    g_loadedModules.push_back(defaultMod);
+
+    // Preload secondary modules (Loader_DLL.xex and Swing_DLL.xex)
+    LoadModuleImage("Loader_DLL.xex");
+    LoadModuleImage("Swing_DLL.xex");
+}
+
+
+LoadedModule* FindLoadedModule(uint32_t ldrEntry)
+{
+    for (auto& mod : g_loadedModules)
+    {
+        if (mod.ldrEntry == ldrEntry)
+            return &mod;
+    }
+    return nullptr;
+}
+
+LoadedModule* FindLoadedModuleByName(const std::string& name)
+{
+    std::string baseName = name;
+    size_t lastSlash = baseName.find_last_of("\\/");
+    if (lastSlash != std::string::npos)
+        baseName = baseName.substr(lastSlash + 1);
+
+    for (auto& mod : g_loadedModules)
+    {
+        if (_stricmp(mod.name.c_str(), baseName.c_str()) == 0)
+            return &mod;
+    }
+    return nullptr;
+}
+
+void InitModule(LoadedModule& mod, PPCContext& ctx, uint8_t* base)
+{
+    if (mod.initialized || !mod.entryPoint)
+        return;
+    mod.initialized = true;
+    Log("loader: invoking DllMain for %s at %08X (hModule=%08X)", mod.name.c_str(), mod.entryPoint, mod.ldrEntry);
+    PPCHostFunc* func = PPCLookupIndirect(mod.entryPoint);
+    if (!func)
+    {
+        Log("loader: entry point %08X not found in indirect table", mod.entryPoint);
+        return;
+    }
+
+    PPCContext dllCtx = ctx;
+    dllCtx.r3.u64 = mod.ldrEntry;
+    dllCtx.r4.u64 = 1; // DLL_PROCESS_ATTACH
+    dllCtx.r5.u64 = 0; // lpvReserved
+    dllCtx.lr = 0;
+
+    func(dllCtx, base);
+    Log("loader: DllMain for %s finished (result %08X)", mod.name.c_str(), dllCtx.r3.u32);
+}
+
+uint32_t GetModuleHandleByName(const std::string& name)
+{
+    if (name.empty())
+        return g_title.ldrEntry;
+    LoadedModule* mod = FindLoadedModuleByName(name);
+    return mod ? mod->ldrEntry : 0;
+}
+
+uint32_t LoadModuleImage(const std::string& name)
+{
+    std::string baseName = name;
+    size_t lastSlash = baseName.find_last_of("\\/");
+    if (lastSlash != std::string::npos)
+        baseName = baseName.substr(lastSlash + 1);
+
+    for (const auto& mod : g_loadedModules)
+    {
+        if (_stricmp(mod.name.c_str(), baseName.c_str()) == 0)
+            return mod.ldrEntry;
+    }
+
+    std::filesystem::path fullPath = g_gameTitleDir / baseName;
+    if (!std::filesystem::exists(fullPath))
+    {
+        fullPath = "game" / std::filesystem::path(baseName);
+        if (!std::filesystem::exists(fullPath))
+        {
+            Log("loader: module file %s not found", fullPath.string().c_str());
+            return 0;
+        }
+    }
+
+    std::vector<uint8_t> file = ReadFile(fullPath);
+    Image image = Image::ParseImage(file.data(), file.size());
+    if (!image.data)
+    {
+        Log("loader: could not decrypt/decompress %s", fullPath.string().c_str());
+        return 0;
+    }
+
+    // PE headers, then every section
+    memcpy(GuestPtr(image.base), image.data.get(), 0x600);
+    uint32_t textStart = 0, textEnd = 0;
+    for (const Section& s : image.sections)
+    {
+        if (s.name == ".reloc")
+            continue;
+        memcpy(GuestPtr(uint32_t(s.base)), s.data, s.size);
+        if (s.name == ".text")
+        {
+            textStart = uint32_t(s.base);
+            textEnd = uint32_t(s.base + s.size);
+        }
+    }
+
+    const uint32_t headerSize = Be32(file.data() + 8);
+    uint32_t xexHeader = GuestAlloc(Heap::Virtual, headerSize, 0x1000);
+    memcpy(GuestPtr(xexHeader), file.data(), headerSize);
+
+    // Module handle: LDR_DATA_TABLE_ENTRY
+    uint32_t ldr = GuestAlloc(Heap::Virtual, 0x100);
+    for (uint32_t list = 0; list < 0x18; list += 8)
+    {
+        StoreBE32(ldr + list, ldr + list);
+        StoreBE32(ldr + list + 4, ldr + list);
+    }
+    StoreBE32(ldr + 0x18, uint32_t(image.base));
+    StoreBE32(ldr + 0x1C, uint32_t(image.base));
+    StoreBE32(ldr + 0x20, image.size);
+    StoreBE32(ldr + 0x38, image.size);
+    StoreBE32(ldr + 0x3C, uint32_t(image.entry_point));
+    StoreBE32(ldr + 0x58, xexHeader);
+
+    // Read export table from security info
+    uint32_t secOffset = Be32(file.data() + 0x10);
+    uint32_t exportTable = 0;
+    if (secOffset + 0x160 <= file.size())
+    {
+        exportTable = Be32(file.data() + secOffset + 4 + 4 + 0x100 + 4 + 4 + 4 + 0x14 + 4 + 0x14 + 16 + 16);
+    }
+
+    ResolveVariableImports(file.data(), textStart, textEnd);
+
+    LoadedModule mod;
+    mod.name = baseName;
+    mod.base = uint32_t(image.base);
+    mod.size = image.size;
+    mod.entryPoint = uint32_t(image.entry_point);
+    mod.xexHeader = xexHeader;
+    mod.ldrEntry = ldr;
+    mod.exportTable = exportTable;
+    g_loadedModules.push_back(mod);
+
+    Log("loader: loaded module %s base %08X size %08X entry %08X exportTable %08X",
+        baseName.c_str(), mod.base, mod.size, mod.entryPoint, mod.exportTable);
+    return ldr;
+}
+
+uint32_t GetModuleProcAddress(uint32_t ldrEntry, uint32_t ordinal)
+{
+    const LoadedModule* mod = nullptr;
+    for (const auto& m : g_loadedModules)
+    {
+        if (m.ldrEntry == ldrEntry)
+        {
+            mod = &m;
+            break;
+        }
+    }
+    if (!mod && (ldrEntry == 0 || ldrEntry == g_title.ldrEntry))
+    {
+        // default.xex
+        return 0;
+    }
+    if (!mod)
+    {
+        Log("loader: GetModuleProcAddress: unknown module handle %08X", ldrEntry);
+        return 0;
+    }
+
+    if (mod->exportTable)
+    {
+        // xex2_export_table starts at exportTable + 32 (skip 32-byte header)
+        const uint32_t tbl = mod->exportTable + 32;
+        const uint16_t hibase = LoadBE16(tbl + 2);
+        const uint32_t count = LoadBE32(tbl + 4);
+        const uint32_t base = LoadBE32(tbl + 8);
+        if (ordinal >= base && ordinal < base + count)
+        {
+            const uint32_t offset = LoadBE32(tbl + 12 + (ordinal - base) * 4);
+            const uint32_t addr = (uint32_t(hibase ? hibase : (mod->base >> 16)) << 16) | offset;
+            Log("loader: GetModuleProcAddress(%s, ord %u) -> %08X", mod->name.c_str(), ordinal, addr);
+            return addr;
+        }
+    }
+
+    // Specific known fallback ordinals
+    if (_stricmp(mod->name.c_str(), "Loader_DLL.xex") == 0)
+    {
+        if (ordinal == 1) return 0x8348B0E0;
+        if (ordinal == 2) return 0x83492C70;
+        if (ordinal == 3) return 0x83492920;
+    }
+    else if (_stricmp(mod->name.c_str(), "Swing_DLL.xex") == 0)
+    {
+        if (ordinal == 1) return 0x885F5218;
+        if (ordinal == 2) return 0x885F5228;
+        if (ordinal == 3) return 0x885F5210;
+    }
+
+    Log("loader: GetModuleProcAddress(%s, ord %u): ordinal not found", mod->name.c_str(), ordinal);
+    return 0;
 }

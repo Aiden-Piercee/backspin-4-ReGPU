@@ -191,6 +191,7 @@ bool VfsResolve(std::string guest, fs::path& host, bool* readOnly)
         return true;
     };
     if (!(match("\\device\\cdrom0", GameDir(), true) || match("game:", GameDir(), true) || match("d:", GameDir(), true) ||
+            match("\\device\\image", GameDir(), true) ||
             match("\\device\\harddisk0\\partition1", UserDir() / "hdd", false) ||
             match("\\device\\harddisk0\\partition0", UserDir() / "hdd", false) ||
             match("\\device\\harddisk0\\cache0", UserDir() / "cache", false) ||
