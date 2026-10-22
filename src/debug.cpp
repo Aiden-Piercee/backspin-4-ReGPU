@@ -132,8 +132,7 @@ std::string Handle(const std::string& line)
         while (!g_swapTimes.empty() && now - g_swapTimes.front() > std::chrono::seconds(1))
             g_swapTimes.pop_front();
         char buf[256];
-        snprintf(buf, sizeof(buf), "\"frame\":%llu,\"fps\":%zu,\"profile\":\"%s\"", (unsigned long long)g_frame, g_swapTimes.size(),
-            Escape(GetSettings().profile).c_str());
+        snprintf(buf, sizeof(buf), "\"frame\":%llu,\"fps\":%zu", (unsigned long long)g_frame, g_swapTimes.size());
         return Ok(buf);
     }
     // press A [ms]   press A+B 200   (held for ms, default 120, then released)

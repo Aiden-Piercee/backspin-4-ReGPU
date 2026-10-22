@@ -3,6 +3,9 @@
 // (memory writes, fences, interrupts, waits) and skips everything that would
 // draw. Vblank interrupts run at 60 Hz. Phase 2 replaces drawing with a
 // native renderer hooked at the D3D level.
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -18,6 +21,8 @@
 #include "settings.h"
 #include "kernel/imports.h"
 #include "kernel/thread.h"
+
+using Clock = std::chrono::steady_clock;
 #include "gpu/regs.h"
 #include "render/presenter.h"
 #include "gpu/renderer.h"
@@ -48,7 +53,7 @@ struct Gpu
     std::atomic<uint32_t> interruptData{ 0 };
     uint32_t rptr = 0;
 
-    std::shared_ptr<ThreadObject> interruptThread;
+    bool interruptThread = false;
     std::mutex interruptMutex;
     std::condition_variable interruptCv;
     std::vector<std::pair<uint32_t, uint32_t>> pendingInterrupts; // source, cpu
@@ -453,14 +458,15 @@ void DispatchInterrupt(PPCContext& ctx, uint32_t source, uint32_t cpu)
         return;
     // The handler acknowledges by clearing the bit of the CPU it runs on,
     // read from the PCR; it runs with that CPU's interrupts disabled.
-    *GuestPtr<uint8_t>(CurrentGuestThread()->pcr + kpcr::CurrentCpu) = uint8_t(cpu);
-    InterruptLockAcquire(int(cpu));
+    const regpu::Host& host = regpu::GetHost();
+    *GuestPtr<uint8_t>(host.currentPcr() + kpcr::CurrentCpu) = uint8_t(cpu);
+    host.interruptLockAcquire(int(cpu));
     ctx.msr &= ~0x8000ull;
     ctx.r3.u64 = source;
     ctx.r4.u64 = g_gpu.interruptData;
-    GuestCall(ctx, callback);
+    host.guestCall(ctx, callback);
     ctx.msr |= 0x8000;
-    InterruptLockRelease();
+    host.interruptLockRelease();
 }
 
 // Vblank callbacks run on a guest thread of their own, like the console's
@@ -1250,8 +1256,9 @@ void GpuStartInterruptThread()
 {
     if (g_gpu.interruptThread)
         return;
-    g_gpu.interruptThread = CreateHostGuestThread("gpu vblank irq", InterruptLoop);
-    CreateHostGuestThread("gpu command processor", CommandProcessorLoop);
+    g_gpu.interruptThread = true;
+    regpu::GetHost().createThread("gpu vblank irq", InterruptLoop);
+    regpu::GetHost().createThread("gpu command processor", CommandProcessorLoop);
 }
 
 uint64_t GpuSwapCount() { return g_gpu.swaps; }

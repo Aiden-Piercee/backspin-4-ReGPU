@@ -2,11 +2,8 @@
 #include <cstdint>
 #include <vector>
 
-struct ScannedShader
-{
-    bool pixel;
-    std::vector<uint32_t> code; // microcode dwords exactly as in guest memory (big endian)
-};
+#include "regpu/regpu.h"
+using ScannedShader = regpu::ScannedShader;
 
 // Scans guest physical memory for shader objects not reported before; results queue up
 // for ShaderScanTake. Synchronous, with `threads` workers.

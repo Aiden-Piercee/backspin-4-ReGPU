@@ -3,8 +3,9 @@
 #include <cstdint>
 #include <cstring>
 
-// The guest's 4 GB address space, reserved and committed in one block. Guest
-// address A lives at g_base + A.
+#include "regpu/regpu.h"
+
+// The guest's 4 GB address space (Host::base): guest address A lives at g_base + A.
 inline uint8_t* g_base = nullptr;
 
 template <typename T = void>
@@ -69,25 +70,17 @@ inline void StoreBE32(uint32_t address, uint32_t v) { *GuestPtr<uint32_t>(addres
 inline uint64_t LoadBE64(uint32_t address) { return __builtin_bswap64(*GuestPtr<uint64_t>(address)); }
 inline void StoreBE64(uint32_t address, uint64_t v) { *GuestPtr<uint64_t>(address) = __builtin_bswap64(v); }
 
-void MemoryInit();
-
-// Guest heaps. Memory is already committed; these only hand out ranges, and
-// zero them. All are thread-safe.
+// Guest memory from the game's allocator (Host::alloc).
 enum class Heap
 {
-    Virtual,  // NtAllocateVirtualMemory, runtime objects: 0x40000000-0x7EFFFFFF
-    Physical, // MmAllocatePhysicalMemoryEx (GPU-visible), 0xA0000000 view
+    Virtual,
+    Physical, // GPU-visible
 };
 
-uint32_t GuestAlloc(Heap heap, uint32_t size, uint32_t alignment = 16);
-// Physical memory is visible at 0xA0000000 (64 KB pages), 0xC0000000 (16 MB
-// pages) and 0xE0000000 (4 KB pages); all three alias the same 512 MB.
-uint32_t GuestAllocPhysical(uint32_t size, uint32_t alignment, uint32_t viewBase);
-uint32_t PhysicalViewBase(uint32_t protect);
-// Returns false if address is not the start of a live allocation.
-bool GuestFree(uint32_t address);
-// Size of the allocation that contains address, 0 if none.
-uint32_t GuestAllocationSize(uint32_t address, uint32_t* start = nullptr);
+inline uint32_t GuestAlloc(Heap heap, uint32_t size, uint32_t alignment = 16)
+{
+    return regpu::GetHost().alloc(heap == Heap::Physical, size, alignment);
+}
 
-// File-mapping handle of the 512 MB physical memory section (for GPU access).
-void* PhysicalSection();
+// File-mapping handle of the 512 MB physical memory section (Host::physicalSection), or null.
+inline void* PhysicalSection() { return regpu::GetHost().physicalSection; }

@@ -19,7 +19,6 @@
 
 using Microsoft::WRL::ComPtr;
 
-void DealerOnChar(wchar_t c); // hooks/dealer.cpp: a typed easter-egg code
 
 namespace
 {
@@ -72,7 +71,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_CHAR)
     {
-        DealerOnChar(wchar_t(wp));
+        if (regpu::GetHost().onChar)
+            regpu::GetHost().onChar(wchar_t(wp));
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }

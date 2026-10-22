@@ -25,7 +25,6 @@
 #include <map>
 #include <set>
 #include <shared_mutex>
-#include <regex>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -54,15 +53,11 @@
 #include "render/presenter.h"
 #include "gpu/renderer.h"
 #include "gpu/shader_scan.h"
-#include "gpu/boot_screen.h"
-#include "gpu/static_shaders.h"
 
 using Microsoft::WRL::ComPtr;
 
 
-void LogAllHostThreadStacks(const char* why); // hang.cpp
-extern std::atomic<bool> g_cameraAspectWidened; // hooks/camera_aspect.cpp
-void DealerCarDraw(uint64_t vs, const float c[256][4], float squash[4][4], bool body); // hooks/dealer.cpp: the easter egg, per car draw
+std::atomic<bool> g_gameWidescreen{ false }; // regpu::SetGameWidescreen
 
 namespace
 {
@@ -292,8 +287,7 @@ struct CompiledShader
     TranslatedShader info;
     const CompiledShader* hlslSource = nullptr; // canonical variants: the shader whose code (and HLSL) this reuses
     mutable const CompiledShader* motion = nullptr; // its motion-vector variant, once looked up
-    bool carBody = false; // a car-body vertex shader (ApplyDirtSeamFix): takes the easter egg's squash
-    bool carPart = false; // another car-mesh vertex shader (tyres, brakes): moves with its car in the egg
+    uint32_t tag = 0; // the game's mark for this shader (Host::rewriteShader), passed to Host::onDraw
     bool IsReady() const { return state.load(std::memory_order_acquire) == Ready; }
 };
 
@@ -2038,65 +2032,6 @@ uint64_t PsEditAlias(uint64_t hash)
     return it == g_psEditAlias.end() ? hash : it->second;
 }
 
-// The car body's dirt map (a DXT1 1024x128 the game updates as dirt builds up) is wrapped round the car:
-// the body vertex shader takes u from an atan2 of the normal, whose branch cut runs along the top centre
-// line, so u is ~1 on one side of the bonnet and ~0 on the other. The triangles across that line
-// interpolate the long way round and squeeze the whole map into a strip: once there is dirt, dark streaks
-// along the bonnet (the AE86 at Tsukuba from lap 2). Seam-safe sampling: those vertex shaders also output
-// frac(u + 0.5) (o[9], with a flag in .y), and pixel shaders that sample at that u take whichever of the
-// two changes less across the pixel. Elsewhere both give the same texel. FM2_NO_SEAM_FIX=1 turns it off.
-// The easter egg's squash, for every mesh of a car (body, tyres, brakes, glass): the clip position is moved
-// by K (opos.xyw - o.xyw), the reference car's axes scaled about its origin (dealer.cpp DealerCarDraw), so
-// all of a car's parts squash together whatever transform each was drawn with. Off (vsquash zero) normally.
-bool AddCarSquash(std::string& hlsl)
-{
-    static const std::string end = "}\nvoid GuestVS(uint vindex, out float4 opos, out float4 o[16])\n";
-    const size_t e = hlsl.find(end);
-    if (e == std::string::npos)
-        return false;
-    hlsl.insert(e, "            if (vsquash[3].w > 0) { float3 q = opos.xyw - float3(vsquash[0].w, vsquash[1].w, vsquash[2].w);\n"
-                   "                opos += float4(dot(vsquash[0].xyz, q), dot(vsquash[1].xyz, q), dot(vsquash[2].xyz, q), dot(vsquash[3].xyz, q)); }\n");
-    return true;
-}
-
-// Other car meshes (tyres, brake discs): their positions are dequantised like the body's (q * w + vc[191]).
-bool MarkCarPart(std::string& hlsl)
-{
-    static const std::regex dequant(R"(\(r\[\d+\]\.\w+\), \(r\[\d+\]\.wwww\)\) \+ \(vc\[191\])");
-    return std::regex_search(hlsl, dequant) && AddCarSquash(hlsl);
-}
-
-// Returns true for a car-body vertex shader (it also gets the easter egg's bounce: see dealer.cpp).
-bool ApplyDirtSeamFix(std::string& hlsl, bool pixel)
-{
-    static LiveSwitch off("FM2_NO_SEAM_FIX");
-    if (!pixel)
-    {
-        // o[0].z = u (from the angle), o[0].w = v; o[9] is free in these shaders.
-        static const std::string uv = "(r[0].wwww) + (vc[189].xxxx); s = (vc[190].x) + (r[0].y); ps = s; o[0].z = v.z; o[0].w = s.xxxx.w; }";
-        const size_t at = hlsl.find(uv);
-        if (at == std::string::npos)
-            return false;
-        if (!off && hlsl.find("o[9]") == std::string::npos)
-            hlsl.insert(at + uv.size(), " o[9] = float4(frac(o[0].z + 0.5), 1, 0, 0);");
-        AddCarSquash(hlsl);
-        return true;
-    }
-    if (off)
-        return false;
-    static const std::string coord = "float3(r[0].z, r[0].w, r[0].x)";
-    static const std::string init = "for (int j = 0; j < 16; j++) r[j] = input.o[j];";
-    const size_t start = hlsl.find(init);
-    if (start == std::string::npos || hlsl.find(coord) == std::string::npos)
-        return false;
-    // Chosen before the shader's control-flow loop (derivatives there would be per-branch).
-    hlsl.insert(start + init.size(),
-        "\n    float seamU = input.o[9].y > 0.5 && fwidth(input.o[9].x) < fwidth(input.o[0].z) ? input.o[9].x - 0.5 : input.o[0].z;");
-    for (size_t at; (at = hlsl.find(coord)) != std::string::npos;)
-        hlsl.replace(at, coord.size(), "float3(input.o[9].y > 0.5 ? seamU : r[0].z, r[0].w, r[0].x)");
-    return false;
-}
-
 const CompiledShader& GetShaderLocked(uint64_t hash, const std::vector<uint32_t>& codeBE, bool pixel, bool background);
 // Shaders are never removed: each thread remembers the ones it looked up (no lock per draw).
 const CompiledShader& GetShader(uint64_t hash, const std::vector<uint32_t>& codeBE, bool pixel, bool background = false)
@@ -2165,8 +2100,7 @@ const CompiledShader& GetShaderLocked(uint64_t hash, const std::vector<uint32_t>
                 cs.cacheKey = base.cacheKey;
                 cs.code = base.code;
                 cs.hlslSource = &base;
-                cs.carBody = base.carBody;
-                cs.carPart = base.carPart;
+                cs.tag = base.tag;
                 cs.state = CompiledShader::Ready;
                 g_stats.shadersCached++;
                 path = "variant";
@@ -2185,10 +2119,9 @@ const CompiledShader& GetShaderLocked(uint64_t hash, const std::vector<uint32_t>
         cs.state = CompiledShader::Failed;
         return cs;
     }
-    cs.carBody = ApplyDirtSeamFix(cs.info.hlsl, pixel);
-    cs.carPart = !pixel && !cs.carBody && MarkCarPart(cs.info.hlsl);
-    if (cs.carBody)
-        Log("renderer: vs %016llx is a car body", (unsigned long long)hash);
+    // The game's own fixes to this shader (regpu.h Host::rewriteShader).
+    if (const auto rewrite = regpu::GetHost().rewriteShader)
+        cs.tag = rewrite(hash, cs.info.hlsl, pixel);
     if (g_dumpHlsl)
     {
         std::filesystem::create_directories("out/hlsl");
@@ -4834,7 +4767,8 @@ void WaitHoldingImpl(const std::function<bool()>& done)
                 "pipeline builds in flight %d",
                 std::chrono::duration<double>(now - start).count(), g_waitWhat, int(done()), int(lookPending), g_look.size(),
                 g_compiler.jobs.load(), queued, background, parked, g_stats.busy.load());
-            LogAllHostThreadStacks("renderer wait over 20 s");
+            if (regpu::GetHost().logThreadStacks)
+                regpu::GetHost().logThreadStacks("renderer wait over 20 s");
         }
         if (now - start > std::chrono::milliseconds(150))
         {
@@ -5752,7 +5686,6 @@ void WorkerMain()
 }
 }
 
-std::string CurrentHostStack(int maxFrames);
 // Exceptions escaping a thread end the process silently: say where.
 void InstallTerminateLog()
 {
@@ -5762,7 +5695,7 @@ void InstallTerminateLog()
             std::string what = "?";
             if (auto e = std::current_exception())
                 try { std::rethrow_exception(e); } catch (const std::exception& x) { what = x.what(); } catch (...) {}
-            Log("CRASH: std::terminate (%s): %s", what.c_str(), CurrentHostStack(24).c_str());
+            Log("CRASH: std::terminate (%s): %s", what.c_str(), regpu::GetHost().currentStack ? regpu::GetHost().currentStack(24).c_str() : "");
             fflush(nullptr);
             std::abort();
         });
@@ -6183,7 +6116,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         float vscale[4], voffset[4];
         uint32_t vte[4];
         uint32_t vfl[32][4]; // vertex fetch layout of the bound shader
-        float vsquash[4][4]; // the easter egg's squash of car meshes (hlsl.cpp); zero = off
+        float vuser[4][4];   // the game's per-draw constants (Host::onDraw; hlsl.cpp vuser), zero by default
         float vwide[4];      // x: Hor+ factor (see hlsl.cpp)
         float vjitter[4];     // motion-vector variants: this frame's jitter (NDC)
     };
@@ -6304,7 +6237,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     {
         const float wide = WidePass() ? OutputWide() : 1.0f;
         const float extent = WidePass() ? ViewExtent() : 1.0f;
-        const bool gameWidened = g_cameraAspectWidened.load(std::memory_order_relaxed);
+        const bool gameWidened = g_gameWidescreen.load(std::memory_order_relaxed);
         vc->vwide[0] = gameWidened ? 1.0f : 1.0f / extent;
         vc->vwide[1] = wide / extent;
         static LiveSwitch noSqueeze("FM2_NO_HUD_SQUEEZE"); // A/B: 2D stretched with the view
@@ -6400,16 +6333,10 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     vc->point[1] = float(pointSize & 0xFFFF) / 8.0f;
     vc->point[2] = float(pointMinMax & 0xFFFF) / 8.0f;
     vc->point[3] = float(pointMinMax >> 16) / 8.0f;
-    // Car meshes read vsquash as their squash (the "whysthisdealer" easter egg, dealer.cpp).
-    memset(vc->vsquash, 0, sizeof(vc->vsquash));
-    if (vs.carBody || vs.carPart)
-    {
-        DealerCarDraw(C().vsHash, vc->c, vc->vsquash, vs.carBody);
-        static LiveSwitch traceCar("FM2_TRACE_CAR_DRAWS");
-        if (traceCar)
-            Log("car draw: vs %016llx ps %016llx origin %.3f %.3f %.3f %.3f x %.3f %.3f %.3f", (unsigned long long)C().vsHash, (unsigned long long)C().psHash,
-                vc->c[3][0], vc->c[3][1], vc->c[3][2], vc->c[3][3], vc->c[0][0], vc->c[0][1], vc->c[0][2]);
-    }
+    // The game's per-draw constants for shaders it rewrote (regpu.h Host::onDraw).
+    memset(vc->vuser, 0, sizeof(vc->vuser));
+    if (const auto onDraw = regpu::GetHost().onDraw; onDraw && (vs.tag || ps.tag))
+        onDraw(C().vsHash, C().psHash, vs.tag, ps.tag, vc->c, vc->vuser);
     pc->info[1] = (gpureg::Get(SQ_PROGRAM_CNTL) >> 18) & 1 ? (gpureg::Get(SQ_CONTEXT_MISC) >> 8) & 0xFF : 0xFF;
 
     const uint32_t colorControl = gpureg::Get(RB_COLORCONTROL);
@@ -6947,8 +6874,8 @@ void RendererOnSwap(uint64_t frameNumber, uint32_t frontBuffer)
         static const double slowMs = getenv("FM2_SLOW_MS") ? atof(getenv("FM2_SLOW_MS")) : 25.0; // slow-frame log threshold
         if (perf && dt > slowMs)
         {
-            void SpikeDump(double ms);
-            SpikeDump(dt + 2.0);
+            if (regpu::GetHost().slowFrame)
+                regpu::GetHost().slowFrame(dt + 2.0);
         }
         if (perf && dt > slowMs)
             Log("perf: slow frame %llu: %.1f ms | draw %.1f ms (worst draw %.1f; shaders %.1f indices %.1f pipeline %.1f constants %.1f "
@@ -7111,19 +7038,23 @@ void PrecompileAll()
     Log("precompile: done in %.1f s (%zu shaders loaded, %zu pipelines started)",
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), shadersInstalled, pipelinesStarted);
 
-    // Every shader in the game data goes to the compile queue as well. Compiles run on
-    // the background workers and the game doesn't wait for them; cached bytecode loads
+    // Every shader in the game data (Host::staticShaders) goes to the compile queue as well. Compiles
+    // run on the background workers and the game doesn't wait for them; cached bytecode loads
     // straight away, so only the first boot pays (FM2_NO_STATIC_SHADERS=1 skips this).
-    if (getenv("FM2_NO_STATIC_SHADERS"))
+    const regpu::Host& host = regpu::GetHost();
+    if (getenv("FM2_NO_STATIC_SHADERS") || !host.staticShaders)
         return;
+    auto BootScreenCompose = [&](const wchar_t* title, uint32_t done, uint32_t total, std::vector<uint8_t>& rgba) {
+        return host.bootScreen && host.bootScreen(title, done, total, rgba);
+    };
     const auto staticStart = std::chrono::steady_clock::now();
     size_t queued = 0;
     std::vector<const CompiledShader*> compiling;
     // The first boot's search of the game files takes a few seconds: say so on screen.
     std::vector<uint8_t> bootFrame;
-    if (!StaticShadersSaved() && BootScreenCompose(L"PREPARING SHADERS", 0, 0, bootFrame))
+    if (!(host.staticShadersSaved && host.staticShadersSaved()) && BootScreenCompose(L"PREPARING SHADERS", 0, 0, bootFrame))
         BootPresent(bootFrame);
-    for (const ScannedShader& s : StaticShaders())
+    for (const regpu::ScannedShader& s : host.staticShaders())
     {
         const uint64_t hash = Fnv(s.code.data(), s.code.size() * 4) ^ (s.pixel ? 1 : 0);
         if (g_r.shaders.count(hash))
@@ -7186,8 +7117,8 @@ void PrecompileAll()
 
 void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
 {
-    void MemScanOnSwap(uint64_t frame);
-    MemScanOnSwap(g_r.frame);
+    if (regpu::GetHost().onSwap)
+        regpu::GetHost().onSwap(g_r.frame);
     if (!g_r.ok)
         return;
     PrecompileAll();
@@ -7625,3 +7556,5 @@ std::string RendererDrawStats()
     }
     return out;
 }
+
+void regpu::SetGameWidescreen(bool on) { g_gameWidescreen.store(on, std::memory_order_relaxed); }
