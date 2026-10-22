@@ -97,7 +97,12 @@ void EnsureDevice()
     {
         ComPtr<ID3D12Debug> debug;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
+        {
             debug->EnableDebugLayer();
+            Log("presenter: D3D12 debug layer on");
+        }
+        else
+            Log("presenter: D3D12 debug layer not available (Graphics Tools not installed?)");
     }
     Check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&g_device)), "D3D12CreateDevice");
     D3D12_COMMAND_QUEUE_DESC qd{};

@@ -504,9 +504,12 @@ void LogDebugMessages()
     ComPtr<ID3D12InfoQueue> queue;
     if (!g_r.device || FAILED(g_r.device->QueryInterface(IID_PPV_ARGS(&queue))))
         return;
+    // The first messages name the cause; the rest are often its echo (calls on a list that failed to close).
     const UINT64 n = queue->GetNumStoredMessages();
-    for (UINT64 i = n > 20 ? n - 20 : 0; i < n; i++)
+    for (UINT64 i = 0; i < n; i++)
     {
+        if (i == 15 && n > 20)
+            i = n - 5;
         SIZE_T size = 0;
         queue->GetMessage(i, nullptr, &size);
         std::vector<char> buffer(size);
@@ -959,6 +962,29 @@ void Init()
 {
     g_r.device = RenderDevice();
     g_r.queue = RenderQueue();
+    // REGPU_D3D12_STACKS=1 (with REGPU_D3D12_DEBUG): each debug-layer error is logged when it
+    // happens, with the stack of the call that made it (the first 3 of each kind).
+    if (getenv("REGPU_D3D12_STACKS"))
+    {
+        ComPtr<ID3D12InfoQueue1> queue;
+        DWORD cookie = 0;
+        if (SUCCEEDED(g_r.device->QueryInterface(IID_PPV_ARGS(&queue))))
+            queue->RegisterMessageCallback(
+                [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id, LPCSTR description, void*) {
+                    if (severity > D3D12_MESSAGE_SEVERITY_ERROR)
+                        return;
+                    static std::mutex m;
+                    static std::unordered_map<int, int> seen;
+                    std::lock_guard lock(m);
+                    if (seen[int(id)]++ >= 3)
+                        return;
+                    const auto stack = regpu::GetHost().currentStack;
+                    Log("d3d12 error %d: %s\n  at %s", int(id), description, stack ? stack(16).c_str() : "?");
+                },
+                D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+        else
+            Log("renderer: no ID3D12InfoQueue1 (REGPU_D3D12_STACKS needs the debug layer)");
+    }
     auto* d = g_r.device;
 
     // Root signature: b0, b1 root CBVs; one table t0-t32; four static samplers.
@@ -1100,7 +1126,8 @@ void Init()
     InitDepthBlit();
     g_r.readback = CreateBuffer(UINT64((OutputWidth() * 4 + 255) & ~255u) * OutputHeight(), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
 
-    kRingSize = (getenv("REGPU_RING_MB") ? std::clamp<UINT64>(UINT64(atoi(getenv("REGPU_RING_MB"))), 16, 2048) : g_r.physical && !getenv("REGPU_NO_DIRECT_FETCH") ? 64 : 384) << 20;
+    kRingSize = (getenv("REGPU_RING_MB") ? std::clamp<UINT64>(UINT64(atoi(getenv("REGPU_RING_MB"))), 16, 2048)
+        : regpu::GetConfig().uploadRingMB ? std::clamp<UINT64>(regpu::GetConfig().uploadRingMB, 16, 2048) : g_r.physical && !getenv("REGPU_NO_DIRECT_FETCH") ? 64 : 384) << 20;
     Log("renderer: upload ring %llu MB per frame", (unsigned long long)(kRingSize >> 20));
     for (UINT i = 0; i < kFrames; i++)
     {
@@ -4564,6 +4591,10 @@ void Resolve()
         const float color[4] = { ((c >> 16) & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f, (c & 0xFF) / 255.0f, (c >> 24) / 255.0f };
         TransitionColor(D3D12_RESOURCE_STATE_RENDER_TARGET);
         const D3D12_RECT hostClear = ToHost(clearRect);
+        static LiveSwitch traceClears("REGPU_TRACE_CLEARS");
+        if (traceClears)
+            Log("resolve clear: %08X rect %ld,%ld-%ld,%ld host %ld,%ld-%ld,%ld colour base %03X surface %08X worker %d", c, clearRect.left, clearRect.top, clearRect.right,
+                clearRect.bottom, hostClear.left, hostClear.top, hostClear.right, hostClear.bottom, C().colorBase, gpureg::Get(RB_SURFACE_INFO), int(C().worker));
         C().list->ClearRenderTargetView(C().rtv, color, 1, &hostClear);
     }
     if ((control >> 9) & 1) // depth/stencil clear: depth 24 bits | stencil 8
@@ -6031,6 +6062,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     if (listOffset == ~0ull)
     {
         TraceSkip("ring full", initiator);
+        g_r.skippedThisFrame++;
         return;
     }
 
@@ -6064,6 +6096,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     if (vsOffset == ~0ull || psOffset == ~0ull)
     {
         TraceSkip("ring full", initiator);
+        g_r.skippedThisFrame++;
         return;
     }
     auto* vc = reinterpret_cast<VSConstants*>(f.ringCpu + vsOffset);
@@ -6158,6 +6191,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         if (dataOffset == ~0ull)
         {
             TraceSkip("ring full", initiator);
+            g_r.skippedThisFrame++;
             return;
         }
         vc->vf[k][0] = uint32_t(dataOffset);
@@ -7257,6 +7291,10 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
         C().list->ResolveQueryData(g_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, frameIndex * 2, 2, g_timestampReadback.Get(), UINT64(frameIndex) * 16);
         Frame().timed = true;
     }
+    // A query must end in the list it began in: one still open at the swap (begun before it,
+    // ended after) made Close fail and removed the device. Its end then answers fully visible.
+    if (g_occlusionOpen)
+        EndOcclusionQuery();
     C().list->Close();
     ID3D12CommandList* lists[] = { C().list->Real() };
     g_r.queue->ExecuteCommandLists(1, lists);

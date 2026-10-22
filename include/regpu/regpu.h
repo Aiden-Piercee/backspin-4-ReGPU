@@ -31,6 +31,10 @@ struct Config
     float sharpness = 0.5f; // 0-1
     std::filesystem::path userDir = "."; // shader and pipeline caches, dumps
     std::wstring windowTitle = L"ReGPU";
+    // Upload ring per frame (constants, vertices, textures), in MB; 0 is ReGPU's default (64 with
+    // direct fetch). About 11 KB a draw goes to constants alone: titles with thousands of draws need
+    // more, or their last draws are dropped. REGPU_RING_MB overrides it.
+    uint32_t uploadRingMB = 0;
 
     // The scene's resolution as a fraction of the output (1 when upscaling is off).
     float SceneScale() const;
