@@ -4471,7 +4471,19 @@ void Resolve()
         // host texture by the image's own base so the tiles land together.
         const uint32_t pitchReg = gpureg::Get(RB_COPY_DEST_PITCH);
         const uint32_t pitch = pitchReg & 0x3FFF;
-        const uint32_t base = ((gpureg::Get(RB_COPY_DEST_BASE) & 0x1FFFFFFF) - uint32_t(rect.top) * pitch * 4) & 0x1FFFFFFF;
+        const uint32_t info = gpureg::Get(RB_COPY_DEST_INFO);
+        const bool depth = sourceSelect == 4;
+        const uint32_t destFormat = (info >> 7) & 0x3F;
+        // Guest bytes per pixel (Xenos colour formats: k_8 2, 16-bit 3-5/10/15/24, 64-bit 26/32/37, 128-bit 34/38).
+        const uint32_t guestBpp = depth ? 4
+            : destFormat == 2 ? 1
+            : (destFormat >= 3 && destFormat <= 5) || destFormat == 10 || destFormat == 15 || destFormat == 24 ? 2
+            : destFormat == 26 || destFormat == 32 || destFormat == 37 ? 8
+            : destFormat == 34 || destFormat == 38 ? 16 : 4;
+        // The tile's rows are pitch * guestBpp bytes each (PGR4's 2xMSAA HDR scene, k_16_16_16_16_FLOAT,
+        // put its lower tile in a separate image at 4 bytes a pixel: the bottom third came out black).
+        static LiveSwitch noTileBpp("REGPU_NO_TILE_BPP"); // A/B: rows of 4 bytes a pixel, as before
+        const uint32_t base = ((gpureg::Get(RB_COPY_DEST_BASE) & 0x1FFFFFFF) - uint32_t(rect.top) * pitch * (noTileBpp ? 4 : guestBpp)) & 0x1FFFFFFF;
         const uint32_t width = std::clamp<uint32_t>(pitch, 1, std::max<uint32_t>(kWidth, BigPassSize()));
         // Taller than the screen is possible: a 1024x1024 target drawn as tall passes is resolved
         // 720 rows at a time and sampled as 1024 rows. The texture keeps all its rows (clamped to
@@ -4486,11 +4498,8 @@ void Resolve()
         if (auto it = g_r.resolved.find(base); !noKeep && it != g_r.resolved.end() && it->second.resource && rect.top > 0 &&
                                                 uint32_t(rect.bottom) <= it->second.height && it->second.height < height)
             height = it->second.height;
-        const uint32_t info = gpureg::Get(RB_COPY_DEST_INFO);
-        const bool depth = sourceSelect == 4;
         // Destination: 8888 stays 8-bit (clamped, as the hardware does); other
         // formats keep the HDR range. The exponent bias scales colour copies.
-        const uint32_t destFormat = (info >> 7) & 0x3F;
         // k_2_10_10_10 (7) is a fixed-point front-buffer format too (PGR4 presents one); it gets the same
         // presentable 8-bit host image, losing its low two bits. REGPU_NO_1010102_AS_8888 keeps it HDR.
         static LiveSwitch no1010102("REGPU_NO_1010102_AS_8888");
@@ -4500,12 +4509,7 @@ void Resolve()
         // Bit 24 (copy swap): the destination stores red and blue exchanged; the
         // fetch swizzle swaps them back when the title samples it.
         const bool swapRB = !depth && ((info >> 24) & 1);
-        // Guest bytes per pixel (Xenos colour formats: k_8 2, 16-bit 3-5/10/15/24, 64-bit 26/37, 128-bit 38).
-        g_r.resolved[base].guestBpp = depth ? 4
-            : destFormat == 2 ? 1
-            : (destFormat >= 3 && destFormat <= 5) || destFormat == 10 || destFormat == 15 || destFormat == 24 ? 2
-            : destFormat == 26 || destFormat == 37 ? 8
-            : destFormat == 38 ? 16 : 4;
+        g_r.resolved[base].guestBpp = guestBpp;
         BlitResolve(depth, base, width, height, format, rect, depth ? 1.0f : std::ldexp(1.0f, bias));
         // Temporal upscaling: each tile of the main view keeps its depth before it is cleared.
         if (g_temporal && g_scenePhase && !depth && width >= kWidth && rect.left == 0 && rect.right >= LONG(kWidth))
@@ -6035,6 +6039,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     {
         float c[256][4];
         uint32_t b[8];
+        uint32_t l[32]; // loop constants
         uint32_t vf[96][4];
         uint32_t info[4];
         float point[4];
@@ -6049,6 +6054,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     {
         float c[256][4];
         uint32_t b[8];
+        uint32_t l[32]; // loop constants
         uint32_t info[4];
         float info2[4];
         uint32_t tinfo[32][4];
@@ -6102,6 +6108,8 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     }
     for (uint32_t i = 0; i < 8; i++)
         vc->b[i] = pc->b[i] = gpureg::Get(gpureg::BoolConstants + i);
+    for (uint32_t i = 0; i < 32; i++)
+        vc->l[i] = pc->l[i] = gpureg::Get(gpureg::LoopConstants + i);
     // Debug: REGPU_FORCE_BOOL=<index>:<0|1> forces one boolean constant for every draw.
     if (static const char* force = getenv("REGPU_FORCE_BOOL"); force)
     {

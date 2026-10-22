@@ -14,6 +14,7 @@ cbuffer VSConstants : register(b0)
 {
     float4 vc[256];
     uint4 vb[2];      // 256 bool constants
+    uint4 vl[8];      // 32 loop constants: count | start << 8 | step << 16
     uint4 vf[96];     // vertex fetch: x byte offset (gmem, or gphys if z), y endian
     uint4 vinfo;      // x index list byte offset, y position mode (0 clip, 1 screen) | 2 points, z/w target size
     float4 vpoint;    // xy constant point diameter (pixels), z/w min/max diameter
@@ -36,6 +37,7 @@ cbuffer PSConstants : register(b1)
 {
     float4 pc[256];
     uint4 pb[2];
+    uint4 pl[8];
     uint4 pinfo;      // x alpha test function (7 = always), y generated-parameter register (0xFF none)
     float4 pinfo2;    // x alpha reference, y/z 1 / render scale (pixel positions back to game pixels), w colour ceiling (0 none)
     uint4 tinfo[32];  // x sampler (0 lin wrap, 1 lin clamp, 2 point clamp, 3 point wrap), y/z size, w dimension (3 cube)
@@ -643,6 +645,8 @@ struct Emitter
         if (!linear)
         {
             Line("uint cfpc = 0;");
+            // Loops: each level keeps its counter and the aL it replaced.
+            Line("uint loopCount[4] = { 0, 0, 0, 0 }; int loopSaved[4] = { 0, 0, 0, 0 }; uint loopDepth = 0;");
             Line("[loop] for (uint guard = 0; guard < 1024 && cfpc != 0xFFFFu; guard++)");
             Line("{");
             indent++;
@@ -703,6 +707,33 @@ struct Emitter
                         (cf.condition() ? "true" : "false");
                 Line("cfpc = (" + cond + ") ? " + std::to_string(target) + "u : " + next + "u;");
                 Line("continue;");
+                break;
+            }
+            // Loop constant (count | start << 8 | signed step << 16). loop_start sets aL to the
+            // start (a repeat loop keeps it) and skips to its address past loop_end when the
+            // count is 0; loop_end steps aL and jumps back to its address while iterations remain
+            // (a predicated break leaves when p matches the condition).
+            case CfOp::LoopStart:
+            {
+                const uint32_t target = cf.lo & 0x1FFF, id = (cf.lo >> 16) & 0x1F;
+                const std::string k = std::string(pixel ? "pl" : "vl") + "[" + std::to_string(id >> 2) + "][" + std::to_string(id & 3) + "]";
+                Line("{ uint lk = " + k + "; uint d = min(loopDepth, 3u); loopSaved[d] = aL; loopCount[d] = lk & 0xFFu;");
+                if (!((cf.lo >> 13) & 1))
+                    Line("  aL = int((lk >> 8) & 0xFFu);");
+                Line("  loopDepth = min(loopDepth + 1, 4u);");
+                Line("  if ((lk & 0xFFu) == 0) { loopDepth--; aL = loopSaved[min(loopDepth, 3u)]; cfpc = " + std::to_string(target) + "u; continue; } }");
+                break;
+            }
+            case CfOp::LoopEnd:
+            {
+                const uint32_t target = cf.lo & 0x1FFF, id = (cf.lo >> 16) & 0x1F;
+                const std::string k = std::string(pixel ? "pl" : "vl") + "[" + std::to_string(id >> 2) + "][" + std::to_string(id & 3) + "]";
+                std::string brk = "false";
+                if ((cf.lo >> 21) & 1)
+                    brk = cf.condition() ? "p" : "!p";
+                Line("{ uint d = loopDepth > 0 ? min(loopDepth, 4u) - 1u : 0u; loopCount[d]--; aL += int(" + k + " << 8) >> 24;");
+                Line("  if (loopCount[d] != 0 && !(" + brk + ")) { cfpc = " + std::to_string(target) + "u; continue; }");
+                Line("  loopDepth = d; aL = loopSaved[d]; }");
                 break;
             }
             default:
