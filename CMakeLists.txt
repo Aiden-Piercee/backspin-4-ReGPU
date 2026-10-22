@@ -1,67 +1,85 @@
 cmake_minimum_required(VERSION 3.25)
-project(ReGPU CXX)
+project(topspin4 C CXX)
 
-# ReGPU: the Xbox 360 GPU for XenonRecomp ports (include/regpu/regpu.h). A static library the
-# game links; the game's own CMake sets the paths below (or add_subdirectory with them set).
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(FATAL_ERROR "ReGPU needs clang-cl, like XenonRecomp's output")
+    message(FATAL_ERROR "topspin4 needs clang-cl (the recompiled code uses clang builtins)")
 endif()
 
-set(REGPU_XENONRECOMP "" CACHE PATH "XenonRecomp checkout (for XenonUtils/ppc_context.h)")
-set(REGPU_PPC_DIR "" CACHE PATH "The game's XenonRecomp output folder (its ppc_config.h)")
-set(REGPU_FFX "" CACHE PATH "AMD FidelityFX SDK's Kits/FidelityFX folder (FSR1 shader headers; FSR3 runtime with REGPU_FSR3)")
-option(REGPU_FSR3 "AMD FSR 3 upscaling (needs the FidelityFX SDK's signed DLLs)" OFF)
-option(REGPU_DLSS "NVIDIA DLSS (needs the DLSS SDK)" OFF)
-set(REGPU_DLSS_DIR "" CACHE PATH "NVIDIA DLSS SDK folder (with REGPU_DLSS)")
-set(REGPU_D3DCOMPILER "C:/Program Files (x86)/Windows Kits/10/Redist/D3D/x64/d3dcompiler_47.dll" CACHE FILEPATH
-    "Redistributable d3dcompiler_47.dll, to ship beside the game executable (src/gpu/d3dcompiler.cpp)")
+add_subdirectory(thirdparty/XenonRecomp EXCLUDE_FROM_ALL)
 
-if(NOT EXISTS "${REGPU_XENONRECOMP}/XenonUtils/ppc_context.h")
-    message(FATAL_ERROR "Set REGPU_XENONRECOMP to a XenonRecomp checkout")
-endif()
-if(NOT EXISTS "${REGPU_PPC_DIR}/ppc_config.h")
-    message(FATAL_ERROR "Set REGPU_PPC_DIR to the game's XenonRecomp output (with ppc_config.h)")
-endif()
-if(NOT EXISTS "${REGPU_FFX}/upscalers/fsr3/include/gpu/fsr1/ffx_fsr1.h")
-    message(FATAL_ERROR "Set REGPU_FFX to the FidelityFX SDK's Kits/FidelityFX folder (FSR1 shaders)")
+# Recompiled PowerPC modules
+set(TS4_PPC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/ppc")
+set(TS4_LOADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/ppc_loader")
+set(TS4_SWING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/ppc_swing")
+
+file(GLOB TS4_PPC_SOURCES CONFIGURE_DEPENDS "${TS4_PPC_DIR}/*.cpp")
+file(GLOB TS4_LOADER_SOURCES CONFIGURE_DEPENDS "${TS4_LOADER_DIR}/*.cpp")
+file(GLOB TS4_SWING_SOURCES CONFIGURE_DEPENDS "${TS4_SWING_DIR}/*.cpp")
+
+if(NOT TS4_PPC_SOURCES OR NOT TS4_LOADER_SOURCES OR NOT TS4_SWING_SOURCES)
+    message(FATAL_ERROR "Recompiled sources missing: run tools/recomp-ts4.ps1 first")
 endif()
 
-file(GLOB_RECURSE REGPU_SOURCES CONFIGURE_DEPENDS src/*.cpp)
-if(NOT REGPU_FSR3)
-    list(REMOVE_ITEM REGPU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/fsr3.cpp")
-endif()
-if(NOT REGPU_DLSS)
-    list(REMOVE_ITEM REGPU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/dlss.cpp")
-endif()
+set(PPC_FORCE_INCLUDE "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/ppc_hooks.h")
+set(PPC_COMPILE_FLAGS -Wno-everything -msse4.1 -fno-strict-aliasing ${PPC_FORCE_INCLUDE})
 
-# The FSR1, depth copy, gamma and enhance compute shaders, compiled into a header at build time.
-set(REGPU_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
-file(MAKE_DIRECTORY "${REGPU_GENERATED}")
-add_custom_command(OUTPUT "${REGPU_GENERATED}/fsr1_cs.h"
-    COMMAND py -3 -I "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_hlsl.py" "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/fsr1.hlsl" "${REGPU_GENERATED}/fsr1_cs.h"
-            EasuMain,RcasMain,DepthCopyMain,GammaMain,EnhanceMain "${REGPU_FFX}/api/internal/gpu" "${REGPU_FFX}/upscalers/fsr3/include/gpu/fsr1"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/fsr1.hlsl" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_hlsl.py")
-list(APPEND REGPU_SOURCES "${REGPU_GENERATED}/fsr1_cs.h")
+add_library(ts4_ppc STATIC ${TS4_PPC_SOURCES})
+target_include_directories(ts4_ppc PRIVATE "${TS4_PPC_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
+target_compile_options(ts4_ppc PRIVATE ${PPC_COMPILE_FLAGS})
 
-add_library(regpu STATIC ${REGPU_SOURCES})
-target_include_directories(regpu PUBLIC include "${REGPU_PPC_DIR}" "${REGPU_XENONRECOMP}/XenonUtils" "${REGPU_XENONRECOMP}/thirdparty/simde")
-target_include_directories(regpu PRIVATE src "${REGPU_GENERATED}")
-target_compile_definitions(regpu PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
-target_compile_options(regpu PRIVATE -msse4.1 -fno-strict-aliasing -gline-tables-only)
-target_link_libraries(regpu PUBLIC d3d12 dxgi ws2_32 winmm synchronization onecore)
-if(REGPU_FSR3)
-    target_compile_definitions(regpu PRIVATE REGPU_FSR3=1)
-    target_include_directories(regpu PRIVATE "${REGPU_FFX}/api/include" "${REGPU_FFX}/upscalers/include")
-    target_link_libraries(regpu PUBLIC "${REGPU_FFX}/signedbin/amd_fidelityfx_loader_dx12.lib")
-endif()
-if(REGPU_DLSS)
-    target_compile_definitions(regpu PRIVATE REGPU_DLSS=1)
-    target_include_directories(regpu PRIVATE "${REGPU_DLSS_DIR}/include")
-    target_link_libraries(regpu PUBLIC "${REGPU_DLSS_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib")
-endif()
+add_library(ts4_loader_ppc STATIC ${TS4_LOADER_SOURCES})
+target_include_directories(ts4_loader_ppc PRIVATE "${TS4_LOADER_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
+target_compile_options(ts4_loader_ppc PRIVATE ${PPC_COMPILE_FLAGS})
 
-# Build check only: ReGPU linked with nothing else (no unresolved symbols from a game).
-add_executable(regpu_linkcheck EXCLUDE_FROM_ALL tests/linkcheck.cpp)
-target_link_libraries(regpu_linkcheck PRIVATE regpu)
+add_library(ts4_swing_ppc STATIC ${TS4_SWING_SOURCES})
+target_include_directories(ts4_swing_ppc PRIVATE "${TS4_SWING_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
+target_compile_options(ts4_swing_ppc PRIVATE ${PPC_COMPILE_FLAGS})
+
+# Built-in compute shaders (DepthCopy, Gamma, Enhance)
+set(TS4_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${TS4_GENERATED}")
+add_custom_command(OUTPUT "${TS4_GENERATED}/fsr1_cs.h"
+    COMMAND py -3 -I "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fsr1_cs.py" "${TS4_GENERATED}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/fsr1.hlsl" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_fsr1_cs.py"
+    COMMENT "Generating compute shaders")
+
+file(GLOB_RECURSE TOPSPIN4_SOURCES CONFIGURE_DEPENDS src/*.cpp)
+# Exclude optional vendor SDK implementations unless enabled
+list(REMOVE_ITEM TOPSPIN4_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/fsr3.cpp")
+list(REMOVE_ITEM TOPSPIN4_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/dlss.cpp")
+
+add_executable(topspin4 ${TOPSPIN4_SOURCES} "${TS4_GENERATED}/fsr1_cs.h")
+target_include_directories(topspin4 PRIVATE
+    include
+    src
+    "${TS4_GENERATED}"
+    "${TS4_PPC_DIR}"
+    thirdparty/XenonRecomp/XenonUtils
+    thirdparty/XenonRecomp/thirdparty/simde
+)
+target_compile_definitions(topspin4 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+target_compile_options(topspin4 PRIVATE -msse4.1 -fno-strict-aliasing -gline-tables-only ${PPC_FORCE_INCLUDE})
+target_link_options(topspin4 PRIVATE /STACK:0x1000000 /DEBUG)
+
+target_link_libraries(topspin4 PRIVATE
+    ts4_ppc
+    ts4_loader_ppc
+    ts4_swing_ppc
+    XenonUtils
+    d3d12
+    dxgi
+    d3dcompiler
+    ws2_32
+    winmm
+    synchronization
+    onecore
+    dbghelp
+    bcrypt
+)
+
+# Optional diagnostic target: link check
+add_subdirectory(tools/linkcheck linkcheck)

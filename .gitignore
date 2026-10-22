@@ -1,4 +1,16 @@
 build/
 out/
+generated/
+game
 __pycache__/
 *.pyc
+
+# Local inputs copied from sibling repos and the game disc (never committed)
+/_ext/
+/out/
+/build/
+/generated/
+/game
+*.log
+d3dcompiler_47.dll
+

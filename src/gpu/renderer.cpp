@@ -1087,6 +1087,7 @@ void Init()
     InitPipelineLibrary(d);
     // Guest physical memory for the GPU, in place: vertex fetches read it
     // without copies.
+#if defined(__ID3D12Device13_INTERFACE_DEFINED__)
     ComPtr<ID3D12Device13> d13;
     HRESULT hr = d->QueryInterface(IID_PPV_ARGS(&d13));
     if (SUCCEEDED(hr))
@@ -1096,8 +1097,11 @@ void Init()
         Log("renderer: OpenExistingHeapFromFileMapping failed %08X; trying the view address", unsigned(hr));
         hr = d13->OpenExistingHeapFromAddress1(GuestPtr(0xA0000000), 0x20000000, IID_PPV_ARGS(&g_r.physicalHeap));
     }
+#else
+    HRESULT hr = E_NOINTERFACE;
+#endif
     if (FAILED(hr))
-        Log("renderer: mapping guest memory: %s failed %08X", d13 ? "OpenExistingHeapFromAddress1" : "ID3D12Device13", unsigned(hr));
+        Log("renderer: mapping guest memory: ID3D12Device13 unavailable or failed %08X", unsigned(hr));
     else
     {
         D3D12_RESOURCE_DESC bd{};
