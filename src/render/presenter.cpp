@@ -112,6 +112,9 @@ void EnsureDevice()
 
 void CreateWindowAndDevice()
 {
+    if (HDESK desk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL))
+        SetThreadDesktop(desk);
+
     WNDCLASSW wc{};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -160,6 +163,7 @@ void CreateWindowAndDevice()
             r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
     }
     ShowWindow(g_p.window, SW_SHOWNORMAL);
+    ShowWindow(g_p.window, SW_SHOW);
     SetForegroundWindow(g_p.window);
 
     ComPtr<IDXGIFactory4> factory;

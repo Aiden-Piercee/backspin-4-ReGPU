@@ -75,6 +75,9 @@ std::shared_ptr<GuestThread> SetUpGuestThread(uint32_t stackSize, const char* na
 
 DWORD WINAPI HostThreadMain(void* param)
 {
+    if (HDESK desk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL))
+        SetThreadDesktop(desk);
+
     auto* object = static_cast<ThreadObject*>(param);
     std::shared_ptr<GuestThread> thread = object->thread;
     // Keep the object alive until the thread is done with it.

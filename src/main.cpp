@@ -16,6 +16,9 @@ void GpuLogState();
 
 int main(int argc, char** argv)
 {
+    if (HDESK desk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL))
+        SetThreadDesktop(desk);
+
     CrashHandlerInit();
     std::filesystem::path gameDir = argc > 1 ? argv[1] : "game";
     Log("topspin4: game folder %s", std::filesystem::absolute(gameDir).string().c_str());
