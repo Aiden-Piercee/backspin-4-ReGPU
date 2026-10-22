@@ -25,6 +25,7 @@
 #include "log.h"
 #include "memory.h"
 #include "settings.h"
+#include "kernel/thread.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -242,6 +243,11 @@ std::string Handle(const std::string& line)
     {
         RendererRequestCapture();
         return Ok("\"note\":\"traced into out\\\\capture and play log at the next frame\"");
+    }
+    if (cmd == "threads")
+    {
+        LogGuestThreads();
+        return Ok("\"note\":\"logged thread states\"");
     }
     // log [n]: the last n log lines
     if (cmd == "log")
