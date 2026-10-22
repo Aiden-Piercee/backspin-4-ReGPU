@@ -159,6 +159,8 @@ void CreateWindowAndDevice()
         g_p.window = CreateWindowW(L"regpu", GetSettings().windowTitle.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
             r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
     }
+    ShowWindow(g_p.window, SW_SHOWNORMAL);
+    SetForegroundWindow(g_p.window);
 
     ComPtr<IDXGIFactory4> factory;
     Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
