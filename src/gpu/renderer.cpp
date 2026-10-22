@@ -4491,8 +4491,11 @@ void Resolve()
         // Destination: 8888 stays 8-bit (clamped, as the hardware does); other
         // formats keep the HDR range. The exponent bias scales colour copies.
         const uint32_t destFormat = (info >> 7) & 0x3F;
+        // k_2_10_10_10 (7) is a fixed-point front-buffer format too (PGR4 presents one); it gets the same
+        // presentable 8-bit host image, losing its low two bits. REGPU_NO_1010102_AS_8888 keeps it HDR.
+        static LiveSwitch no1010102("REGPU_NO_1010102_AS_8888");
         const DXGI_FORMAT format = depth ? DXGI_FORMAT_R32_FLOAT
-            : destFormat == 6 ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT;
+            : destFormat == 6 || (destFormat == 7 && !no1010102) ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT;
         const int bias = int32_t(info << 10) >> 26; // bits 16-21, signed
         // Bit 24 (copy swap): the destination stores red and blue exchanged; the
         // fetch swizzle swaps them back when the title samples it.
