@@ -6,15 +6,11 @@
 
 void DebugServerStart();
 
-// Input from the server, merged into player 1's pad (imports_xam.cpp ReadPad). False when nothing is held.
-struct DebugPad
-{
-    uint16_t buttons = 0;
-    uint8_t leftTrigger = 0, rightTrigger = 0;
-    int16_t lx = 0, ly = 0, rx = 0, ry = 0;
-    bool sticks = false, triggers = false; // replace the pad's sticks / triggers
-};
-bool DebugPadState(DebugPad& pad);
+#include "regpu/regpu.h"
+
+// Input from the server (regpu.h DebugPadState).
+using DebugPad = regpu::DebugPad;
+inline bool DebugPadState(DebugPad& pad) { return regpu::DebugPadState(pad); }
 
 // The renderer's side: each swap, and screenshots (a pending one names its file).
 void DebugOnSwap(uint64_t frame);

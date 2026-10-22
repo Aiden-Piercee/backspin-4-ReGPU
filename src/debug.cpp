@@ -478,7 +478,7 @@ void DebugServerStart()
     }).detach();
 }
 
-bool DebugPadState(DebugPad& pad)
+bool regpu::DebugPadState(DebugPad& pad)
 {
     if (!g_inputActive.load(std::memory_order_relaxed))
         return false;

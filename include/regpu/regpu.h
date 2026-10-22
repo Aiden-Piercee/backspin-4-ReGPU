@@ -126,6 +126,18 @@ Host& GetHost();
 // Opens the window and the D3D12 device, and starts the command processor. Call once, after filling
 // in Config and Host, before the game calls VdInitializeRingBuffer.
 void Start();
+// The debug server's controller (REGPU_DEBUG=1; tools/regpuctl.py press/hold/stick/trigger): the game
+// merges it into player 1's pad where it reads XInput (XInputGetState / XamInputGetState). False when
+// nothing is held. Buttons use the XInput bits.
+struct DebugPad
+{
+    uint16_t buttons = 0;
+    uint8_t leftTrigger = 0, rightTrigger = 0;
+    int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+    bool sticks = false, triggers = false; // replace the pad's sticks / triggers instead of adding to them
+};
+bool DebugPadState(DebugPad& pad);
+
 // The game draws its 3D view wider than 16:9 itself (a widescreen patch): ReGPU then leaves its
 // field of view alone instead of widening it (Hor+) at wide resolutions.
 void SetGameWidescreen(bool on);

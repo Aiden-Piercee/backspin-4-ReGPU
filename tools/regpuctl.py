@@ -6,7 +6,7 @@
   regpuctl.py run -                    the same from stdin
 
 Commands (sent as typed):
-  ping | status                      alive? / frame, fps, profile
+  ping | status                      alive? / frame, fps
   press A [ms] | press A+B 200       tap buttons (default 120 ms): A B X Y START BACK UP DOWN LEFT RIGHT LB RB LS RS
   hold A | release A | release all   hold until released (release all also stops sticks and triggers)
   stick L|R x y [ms]                 x, y in -1..1; without ms it stays until "stick L 0 0" or "release all"
@@ -22,7 +22,7 @@ Commands (sent as typed):
                                      to read values with a ps edit; "vs HASH" alone goes back
   hlsl HASH [path]                   save a shader's translated HLSL (default out/hlsl/HASH.hlsl)
   switches                           the on/off REGPU_* switches reached so far, and their state
-  switch REGPU_NAME 0|1                flip one live (A/B tests without a restart; one not reached yet is
+  switch REGPU_NAME 0|1              flip one live (A/B tests without a restart; one not reached yet is
                                      kept for when it is)
   env NAME [value]                   set an environment variable inside the game (switches with a value,
                                      which are mostly read once at their first use)
