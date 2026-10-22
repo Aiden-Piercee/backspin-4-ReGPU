@@ -1061,7 +1061,7 @@ void Init()
     ComPtr<ID3D12Device13> d13;
     HRESULT hr = d->QueryInterface(IID_PPV_ARGS(&d13));
     if (SUCCEEDED(hr))
-        hr = d13->OpenExistingHeapFromFileMapping(PhysicalSection(), IID_PPV_ARGS(&g_r.physicalHeap));
+        hr = d13->OpenExistingHeapFromFileMapping(RegpuPhysicalSection(), IID_PPV_ARGS(&g_r.physicalHeap));
     if (FAILED(hr) && d13)
     {
         Log("renderer: OpenExistingHeapFromFileMapping failed %08X; trying the view address", unsigned(hr));
@@ -1780,12 +1780,12 @@ struct Manifest
     size_t next = 0;
     std::unordered_set<uint64_t> shaderFiles;
 
-    static std::filesystem::path Path() { return UserDir() / "pipelines.manifest"; }
+    static std::filesystem::path Path() { return RegpuUserDir() / "pipelines.manifest"; }
     static std::filesystem::path UcodePath(bool pixel, uint64_t hash)
     {
         char name[48];
         snprintf(name, sizeof(name), "%s_%016llx.ucode", pixel ? "ps" : "vs", (unsigned long long)hash);
-        return UserDir() / "shadercache" / name;
+        return RegpuUserDir() / "shadercache" / name;
     }
     void Load()
     {
@@ -1846,7 +1846,7 @@ std::filesystem::path ShaderCachePath(uint64_t key)
 {
     char name[32];
     snprintf(name, sizeof(name), "%016llx.dxbc", (unsigned long long)key);
-    return UserDir() / "shadercache" / name;
+    return RegpuUserDir() / "shadercache" / name;
 }
 
 struct ShaderCompiler
@@ -1865,7 +1865,7 @@ struct ShaderCompiler
 
     void Start()
     {
-        std::filesystem::create_directories(UserDir() / "shadercache");
+        std::filesystem::create_directories(RegpuUserDir() / "shadercache");
         // All but one core: the first boot compiles the whole game behind the overlay.
         const unsigned n = std::max(2u, std::thread::hardware_concurrency() - 1);
         for (unsigned i = 0; i < n; i++)
@@ -2437,7 +2437,7 @@ struct PipelineLibrary
     std::chrono::steady_clock::time_point lastSave = std::chrono::steady_clock::now();
     std::vector<char> loaded;
 
-    static std::filesystem::path Path() { return UserDir() / "pipelines.bin"; }
+    static std::filesystem::path Path() { return RegpuUserDir() / "pipelines.bin"; }
 
     void Init(ID3D12Device* device)
     {
@@ -6819,7 +6819,7 @@ void RendererOnSwap(uint64_t frameNumber, uint32_t frontBuffer)
                 g_perf.section[0] * 1000.0 / g_perf.frames, g_perf.section[1] * 1000.0 / g_perf.frames, g_perf.section[2] * 1000.0 / g_perf.frames,
                 g_perf.section[3] * 1000.0 / g_perf.frames, g_perf.section[4] * 1000.0 / g_perf.frames, g_perf.section[5] * 1000.0 / g_perf.frames);
         if (perf)
-            Log("perf:   cpu%s | slowest frame %.1f ms, %llu over 20 ms", GuestThreadCpuUsage(window).c_str(), g_perf.maxFrame,
+            Log("perf:   cpu%s | slowest frame %.1f ms, %llu over 20 ms", RegpuGuestCpuUsage(window).c_str(), g_perf.maxFrame,
                 (unsigned long long)g_perf.slowFrames);
         if (perf && g_perf.frames)
             Log("perf:   waiting on host GPU %.2f ms/frame | GPU time %.2f ms/frame (worst %.1f)", g_gpuWaitSeconds * 1000.0 / g_perf.frames,

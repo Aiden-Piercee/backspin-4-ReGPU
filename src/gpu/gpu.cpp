@@ -1102,7 +1102,7 @@ void GpuLookahead()
         const uint32_t wptr = Reg(CP_RB_WPTR) % size;
         uint32_t start = g_ringNext;
         const uint32_t queued = (wptr + size - start) % size;
-        static const uint32_t scratch = GuestAlloc(Heap::Virtual, 0x400000 * 4);
+        static const uint32_t scratch = RegpuGuestAlloc(Heap::Virtual, 0x400000 * 4);
         const uint32_t n = std::min<uint32_t>(queued, 0x400000);
         for (uint32_t i = 0; i < n; i++)
             StoreBE32(scratch + i * 4, LoadBE32(base + ((start + i) % size) * 4));
@@ -1180,7 +1180,7 @@ void CommandProcessorLoop(PPCContext& ctx)
                 used = ExecutePacket(base + g_gpu.rptr * 4);
             else
             {
-                static const uint32_t scratch = GuestAlloc(Heap::Virtual, 0x4002 * 4);
+                static const uint32_t scratch = RegpuGuestAlloc(Heap::Virtual, 0x4002 * 4);
                 for (uint32_t i = 0; i < length; i++)
                     StoreBE32(scratch + i * 4, LoadBE32(base + ((g_gpu.rptr + i) % size) * 4));
                 used = ExecutePacket(scratch);
@@ -1320,7 +1320,7 @@ GUEST_EXPORT(VdSetSystemCommandBufferGpuIdentifierAddress) {}
 GUEST_EXPORT(VdGetSystemCommandBuffer)
 {
     // (buffer*, gpuIdentifier*)
-    static uint32_t buffer = GuestAlloc(Heap::Physical, 0x10000, 0x1000);
+    static uint32_t buffer = RegpuGuestAlloc(Heap::Physical, 0x10000, 0x1000);
     StoreIfNonNull(ctx.r3.u32, buffer);
     StoreIfNonNull(ctx.r4.u32, 0xBEEF0000);
 }

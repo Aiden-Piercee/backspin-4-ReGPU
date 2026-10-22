@@ -77,10 +77,10 @@ enum class Heap
     Physical, // GPU-visible
 };
 
-inline uint32_t GuestAlloc(Heap heap, uint32_t size, uint32_t alignment = 16)
+inline uint32_t RegpuGuestAlloc(Heap heap, uint32_t size, uint32_t alignment = 16)
 {
     return regpu::GetHost().alloc(heap == Heap::Physical, size, alignment);
 }
 
 // File-mapping handle of the 512 MB physical memory section (Host::physicalSection), or null.
-inline void* PhysicalSection() { return regpu::GetHost().physicalSection; }
+inline void* RegpuPhysicalSection() { return regpu::GetHost().physicalSection; }

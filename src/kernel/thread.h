@@ -9,7 +9,7 @@ namespace kpcr
 constexpr uint32_t CurrentCpu = 0x10C;
 }
 
-inline std::string GuestThreadCpuUsage(double wallSeconds)
+inline std::string RegpuGuestCpuUsage(double wallSeconds)
 {
     auto f = regpu::GetHost().cpuUsage;
     return f ? f(wallSeconds) : std::string();

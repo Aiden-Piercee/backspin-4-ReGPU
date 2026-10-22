@@ -138,6 +138,12 @@ struct DebugPad
 };
 bool DebugPadState(DebugPad& pad);
 
+// Whether the game window has keyboard focus (read keyboard input only then).
+bool WindowHasFocus();
+// Logs the command processor's state (ring pointers, what it waits on, interrupts, swaps): for a
+// watchdog when the game looks hung.
+void LogState();
+
 // The game draws its 3D view wider than 16:9 itself (a widescreen patch): ReGPU then leaves its
 // field of view alone instead of widening it (Hor+) at wide resolutions.
 void SetGameWidescreen(bool on);

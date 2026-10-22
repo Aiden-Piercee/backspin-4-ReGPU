@@ -8,6 +8,8 @@
 #include "gpu/renderer.h"
 
 void PresenterInit();
+bool PresenterHasFocus();
+void GpuLogState();
 void GpuInit();
 
 namespace regpu
@@ -61,3 +63,6 @@ float Config::SceneScale() const
 } // namespace regpu
 
 void regpu::SaveCaches() { RendererSaveCaches(); }
+
+bool regpu::WindowHasFocus() { return PresenterHasFocus(); }
+void regpu::LogState() { GpuLogState(); }

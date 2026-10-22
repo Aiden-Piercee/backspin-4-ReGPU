@@ -236,7 +236,7 @@ void FrameOnShaderLoad(ShaderType type, const uint32_t* microcodeBE, uint32_t dw
             guestAddress, dwords, __builtin_bswap32(microcodeBE[0]), __builtin_bswap32(microcodeBE[1]));
     if (g_dumpShaders)
     {
-        const auto dir = UserDir() / "shaders";
+        const auto dir = RegpuUserDir() / "shaders";
         std::filesystem::create_directories(dir);
         char name[64];
         snprintf(name, sizeof(name), "%s_%016llx.bin", type == ShaderType::Vertex ? "vs" : "ps", (unsigned long long)hash);
