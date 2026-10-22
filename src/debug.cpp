@@ -1,5 +1,5 @@
 // The live debug server: one client at a time on 127.0.0.1, a line per command, a line of JSON back.
-// See tools/fm2ctl.py for the commands. Input is merged into player 1's pad, screenshots are taken by the
+// See tools/regpuctl.py for the commands. Input is merged into player 1's pad, screenshots are taken by the
 // renderer at its next swap, and the waits block this thread only.
 #include "debug.h"
 
@@ -326,7 +326,7 @@ std::string Handle(const std::string& line)
         fclose(f);
         return Ok("\"path\":\"" + Escape(path) + "\",\"bytes\":" + std::to_string(src.size()));
     }
-    // switches: the on/off FM2_* switches reached so far   switch NAME 0|1: flip one (live_switch.h)
+    // switches: the on/off REGPU_* switches reached so far   switch NAME 0|1: flip one (live_switch.h)
     if (cmd == "switches")
     {
         std::string out;
@@ -338,8 +338,8 @@ std::string Handle(const std::string& line)
     {
         std::string name, value;
         in >> name >> value;
-        if (name.rfind("FM2_", 0) != 0 || (value != "0" && value != "1" && value != "on" && value != "off"))
-            return Error("switch FM2_NAME 0|1");
+        if (name.rfind("REGPU_", 0) != 0 || (value != "0" && value != "1" && value != "on" && value != "off"))
+            return Error("switch REGPU_NAME 0|1");
         const bool on = value == "1" || value == "on";
         const bool known = LiveSwitch::Set(name, on);
         return Ok(std::string("\"name\":\"") + Escape(name) + "\",\"on\":" + (on ? "true" : "false") +
@@ -348,13 +348,13 @@ std::string Handle(const std::string& line)
     // drawstats: the next frame's draws per shader pair
     if (cmd == "drawstats")
         return Ok("\"pairs\":[" + RendererDrawStats() + "]");
-    // type TEXT: as if typed in the game window (WM_CHAR: easter-egg codes)
+    // type TEXT: as if typed in the game window (WM_CHAR: Host::onChar, e.g. cheat codes)
     if (cmd == "type")
     {
         std::string text;
         std::getline(in, text);
         text.erase(0, text.find_first_not_of(' '));
-        if (HWND w = FindWindowW(L"fm2", nullptr))
+        if (HWND w = FindWindowW(L"regpu", nullptr))
             for (char c : text)
                 PostMessageW(w, WM_CHAR, WPARAM(uint8_t(c)), 0);
         return Ok();
@@ -449,10 +449,10 @@ void Serve(SOCKET client)
 
 void DebugServerStart()
 {
-    const char* on = getenv("FM2_DEBUG");
+    const char* on = getenv("REGPU_DEBUG");
     if (!on || !*on || *on == '0')
         return;
-    const int port = getenv("FM2_DEBUG_PORT") ? atoi(getenv("FM2_DEBUG_PORT")) : 7341;
+    const int port = getenv("REGPU_DEBUG_PORT") ? atoi(getenv("REGPU_DEBUG_PORT")) : 7341;
     std::thread([port] {
         SetThreadDescription(GetCurrentThread(), L"debug server");
         WSADATA wsa;
@@ -467,7 +467,7 @@ void DebugServerStart()
             Log("debug: can't listen on 127.0.0.1:%d", port);
             return;
         }
-        Log("debug: listening on 127.0.0.1:%d (tools/fm2ctl.py)", port);
+        Log("debug: listening on 127.0.0.1:%d (tools/regpuctl.py)", port);
         for (;;)
         {
             SOCKET client = accept(listener, nullptr, nullptr);

@@ -1,7 +1,7 @@
-// The HLSL compiler, from d3dcompiler_47.dll beside fm2.exe when there is one (we ship Microsoft's, from the
+// The HLSL compiler, from d3dcompiler_47.dll beside the game executable when there is one (we ship Microsoft's, from the
 // Windows SDK's Redist folder), else the system's. Under Wine and Proton the system copy is Wine's own
 // reimplementation, which fails on our translated shaders (large SM 5.1 programs with unbounded texture
-// arrays): no game shader compiled, a black screen with the game running behind it. fm2.exe defines the two
+// arrays): no game shader compiled, a black screen with the game running behind it. ReGPU defines the two
 // functions it uses here instead of linking d3dcompiler.lib, so every call goes to the copy loaded below.
 #include <windows.h>
 #include <d3dcompiler.h>
@@ -23,7 +23,7 @@ HMODULE Library()
             // A full path loads that file even where Wine would substitute its builtin for the bare name.
             m = LoadLibraryExW(local.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         }
-        Log("d3dcompiler: %s", m ? "using d3dcompiler_47.dll beside fm2.exe" : "using the system's d3dcompiler_47.dll");
+        Log("d3dcompiler: %s", m ? "using d3dcompiler_47.dll beside the executable" : "using the system's d3dcompiler_47.dll");
         if (!m)
             m = LoadLibraryW(L"d3dcompiler_47.dll");
         if (!m)

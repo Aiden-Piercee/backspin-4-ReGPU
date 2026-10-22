@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-// Thread-safe log to stderr and fm2.log next to the exe.
+// Thread-safe log to stderr and regpu.log in the working folder.
 void Log(const char* fmt, ...);
 [[noreturn]] void Fatal(const char* fmt, ...);
 // The last n lines (up to 2000 are kept), for the debug server.

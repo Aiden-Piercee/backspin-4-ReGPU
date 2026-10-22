@@ -3,8 +3,8 @@
 // A shader object the title builds from its asset data embeds a pre-built
 // IM_LOAD_IMMEDIATE packet (header 0xC0nn2B00, type, size, then the microcode) that
 // the D3D layer later copies into the command stream when the shader is bound. The
-// objects appear in memory as a race loads, before anything draws with them, so
-// scanning for those packets lets the renderer compile every shader of a race while
+// objects appear in memory as a level loads, before anything draws with them, so
+// scanning for those packets lets the renderer compile every shader of a level while
 // the loading screen is still up instead of one at a time on first use.
 #include "gpu/shader_scan.h"
 
@@ -98,7 +98,7 @@ void ShaderScanNow(unsigned threads)
 
 void ShaderScanStart()
 {
-    static LiveSwitch off("FM2_NO_SHADER_SCAN");
+    static LiveSwitch off("REGPU_NO_SHADER_SCAN");
     if (off)
         return;
     std::thread([] {

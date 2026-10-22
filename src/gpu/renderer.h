@@ -23,7 +23,7 @@ void RendererSetGammaEntry(uint32_t index, uint32_t rgb10);
 // Benchmark: frame times are recorded while on; the report summarises them.
 void BenchmarkRecord(bool on);
 void BenchmarkWriteReport(const char* path);
-// True while FM2_TRACE_DRAWS's frame is being recorded.
+// True while REGPU_TRACE_DRAWS's frame is being recorded.
 bool RendererTracing();
 
 // Parallel draw translation (gpu.cpp cuts the draw stream between resolves into pieces).

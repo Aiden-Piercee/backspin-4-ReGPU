@@ -28,7 +28,7 @@ cbuffer VSConstants : register(b0)
     float4 vuser[4];
     // xy: clip-space factors for perspective geometry in a wide pass (outputs wider than
     // 16:9; 1 otherwise): x narrows the view to the wider screen (Hor+), y zooms in when
-    // FM2_WIDE_FOV limits how far the view widens; z keeps 2D (HUD, menus) at 16:9; w is 0
+    // REGPU_WIDE_FOV limits how far the view widens; z keeps 2D (HUD, menus) at 16:9; w is 0
     // for draws that sample a resolved render target (screen layers, never squeezed).
     float4 vwide;
 };
@@ -433,7 +433,7 @@ struct Emitter
             const char* neg = a.src[2].negate ? "-" : "";
             if (a.scalarOp <= 43)
                 return set(std::string("Mul9(") + neg + ca + ", " + neg + tb + ")");
-            static const int negMode = getenv("FM2_SC_NEG") ? atoi(getenv("FM2_SC_NEG")) : 0; // 0 both, 1 constant, 2 temp
+            static const int negMode = getenv("REGPU_SC_NEG") ? atoi(getenv("REGPU_SC_NEG")) : 0; // 0 both, 1 constant, 2 temp
             const char* negC = negMode == 2 ? "" : neg;
             const char* negT = negMode == 1 ? "" : neg;
             return set(std::string("(") + negC + ca + ")" + op + "(" + negT + tb + ")");
@@ -534,11 +534,11 @@ struct Emitter
                 lastSrcSwizzle = f.srcSwizzle;
                 lastRound = f.roundIndex;
             }
-            if (getenv("FM2_TRACE_VFETCH"))
+            if (getenv("REGPU_TRACE_VFETCH"))
                 fprintf(stderr, "vfetch: fmt %u signed %d norm %d exp %d stride %u offset %u mini %d round %d\n", f.format, f.isSigned, f.isNormalized,
                     f.expAdjust, lastStride, f.offset, f.isMini, lastRound);
             const uint32_t k = uint32_t(result.vertexFetchLayout.size());
-            static LiveSwitch bakedFetch("FM2_BAKED_VFETCH");
+            static LiveSwitch bakedFetch("REGPU_BAKED_VFETCH");
             const bool dynamic = !bakedFetch && k < 32 && f.src == lastSrc && f.srcSwizzle == lastSrcSwizzle;
             literalFetch = literalFetch || !dynamic;
             if (layoutOnly)

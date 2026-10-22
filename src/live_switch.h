@@ -1,8 +1,8 @@
 #pragma once
-// An on/off FM2_* switch that the debug server can flip while the game runs ("switch NAME 0|1",
-// tools/fm2ctl.py). It starts from the environment variable (set = on), like the getenv() checks it
+// An on/off REGPU_* switch that the debug server can flip while the game runs ("switch NAME 0|1",
+// tools/regpuctl.py). It starts from the environment variable (set = on), like the getenv() checks it
 // replaces, and reading it is one relaxed atomic load. Declare it static where it's used:
-//     static LiveSwitch noFoo("FM2_NO_FOO");
+//     static LiveSwitch noFoo("REGPU_NO_FOO");
 //     if (!noFoo) ...
 // A switch registers itself the first time its line runs; a value set before that is kept for it. Some
 // switches only matter at startup or feed caches, so flipping them shows from the next frame or not at all.

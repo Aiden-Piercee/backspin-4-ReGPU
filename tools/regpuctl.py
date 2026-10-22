@@ -1,9 +1,9 @@
 """Drives the running game through its debug server (src/debug.cpp), so a test doesn't need a restart.
 
-  fm2ctl.py start [NAME=VALUE ...]   start build/tu/fm2.exe with FM2_DEBUG=1 (and those variables), wait for it
-  fm2ctl.py <command> [args]         one command; prints the reply
-  fm2ctl.py run <file>               commands from a file, one per line (# comments); stops at the first error
-  fm2ctl.py run -                    the same from stdin
+  regpuctl.py start [NAME=VALUE ...]   start the game ($REGPU_GAME) with REGPU_DEBUG=1 (and those variables), wait for it
+  regpuctl.py <command> [args]         one command; prints the reply
+  regpuctl.py run <file>               commands from a file, one per line (# comments); stops at the first error
+  regpuctl.py run -                    the same from stdin
 
 Commands (sent as typed):
   ping | status                      alive? / frame, fps, profile
@@ -21,13 +21,13 @@ Commands (sent as typed):
   vs HASH STATEMENT                  that vertex shader also runs STATEMENT at its end (e.g. o[0].zw = r[4].xy;),
                                      to read values with a ps edit; "vs HASH" alone goes back
   hlsl HASH [path]                   save a shader's translated HLSL (default out/hlsl/HASH.hlsl)
-  switches                           the on/off FM2_* switches reached so far, and their state
-  switch FM2_NAME 0|1                flip one live (A/B tests without a restart; one not reached yet is
+  switches                           the on/off REGPU_* switches reached so far, and their state
+  switch REGPU_NAME 0|1                flip one live (A/B tests without a restart; one not reached yet is
                                      kept for when it is)
   env NAME [value]                   set an environment variable inside the game (switches with a value,
                                      which are mostly read once at their first use)
   quit                               close the game
-Port: FM2_DEBUG_PORT (default 7341).
+Port: REGPU_DEBUG_PORT (default 7341).
 """
 import json
 import os
@@ -37,7 +37,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PORT = int(os.environ.get('FM2_DEBUG_PORT', '7341'))
+PORT = int(os.environ.get('REGPU_DEBUG_PORT', '7341'))
 
 
 def connect(timeout=5.0):
@@ -65,16 +65,18 @@ def show(reply):
 
 
 def start(assignments):
-    env = dict(os.environ, FM2_DEBUG='1')
-    env.setdefault('FM2_NO_LAUNCHER', '1')
-    env.setdefault('FM2_NO_UPDATE_CHECK', '1')
+    env = dict(os.environ, REGPU_DEBUG='1')
     for a in assignments:
         k, _, v = a.partition('=')
         env[k] = v
     os.makedirs(os.path.join(ROOT, 'out'), exist_ok=True)
     log = open(os.path.join(ROOT, 'out', 'live.log'), 'w')
     flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
-    p = subprocess.Popen([os.path.join(ROOT, 'build', 'tu', 'fm2.exe')], cwd=ROOT, env=env, stdout=log, stderr=log,
+    game = os.environ.get('REGPU_GAME')
+    if not game:
+        print(json.dumps({'ok': False, 'error': 'set REGPU_GAME to the game executable'}))
+        return 1
+    p = subprocess.Popen([game], cwd=os.path.dirname(os.path.abspath(game)), env=env, stdout=log, stderr=log,
                          creationflags=flags)
     for _ in range(120):
         time.sleep(0.5)
@@ -100,7 +102,7 @@ def main(argv):
     try:
         s = connect()
     except OSError:
-        print(json.dumps({'ok': False, 'error': 'the game is not running with FM2_DEBUG=1 (fm2ctl.py start)'}))
+        print(json.dumps({'ok': False, 'error': 'the game is not running with REGPU_DEBUG=1 (regpuctl.py start)'}))
         return 1
     with s:
         if argv[1] == 'run':

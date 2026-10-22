@@ -97,7 +97,7 @@ uint64_t FastKey(const uint32_t* p, uint32_t dwords, uint32_t type)
         h = (h ^ p[i]) * 0xFF51AFD7ED558CCDull;
     return h ^ (h >> 29);
 }
-const bool g_dumpShaders = getenv("FM2_DUMP_SHADERS") != nullptr;
+const bool g_dumpShaders = getenv("REGPU_DUMP_SHADERS") != nullptr;
 
 struct TextureKey
 {
@@ -166,7 +166,7 @@ void CompositorLoop()
                 Blit(canvas, image, textures[i].Width(), textures[i].Height(), uint32_t(i % cols) * cellW + 2,
                     uint32_t(i / cols) * cellH + 2, cellW - 4, cellH - 4);
         }
-        static const uint64_t dumpFrame = getenv("FM2_DUMP_FRAME") ? strtoull(getenv("FM2_DUMP_FRAME"), nullptr, 10) : 0;
+        static const uint64_t dumpFrame = getenv("REGPU_DUMP_FRAME") ? strtoull(getenv("REGPU_DUMP_FRAME"), nullptr, 10) : 0;
         static uint64_t composed = 0;
         if (++composed == dumpFrame)
         {
@@ -178,7 +178,7 @@ void CompositorLoop()
 }
 }
 
-const bool g_textureView = getenv("FM2_TEXVIEW") != nullptr;
+const bool g_textureView = getenv("REGPU_TEXVIEW") != nullptr;
 
 void FrameOnShaderLoad(ShaderType type, const uint32_t* microcodeBE, uint32_t dwords, uint32_t guestAddress)
 {
@@ -212,8 +212,8 @@ void FrameOnShaderLoad(ShaderType type, const uint32_t* microcodeBE, uint32_t dw
         return;
     if (g_shaders.size() % 50 == 1)
         Log("gpu: %zu distinct shaders seen", g_shaders.size());
-    static LiveSwitch traceAddr("FM2_TRACE_SHADER_ADDR");
-    static LiveSwitch hexAddr("FM2_HEXDUMP_SHADERS");
+    static LiveSwitch traceAddr("REGPU_TRACE_SHADER_ADDR");
+    static LiveSwitch hexAddr("REGPU_HEXDUMP_SHADERS");
     if (hexAddr && guestAddress >= 0x80000000u)
     {
         static int dumped = 0;

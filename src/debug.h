@@ -1,6 +1,6 @@
 #pragma once
-// The live debug server (FM2_DEBUG=1, port FM2_DEBUG_PORT or 7341, 127.0.0.1 only): drive and inspect the
-// running game without restarting it. tools/fm2ctl.py is its client; the commands are listed there.
+// The live debug server (REGPU_DEBUG=1, port REGPU_DEBUG_PORT or 7341, 127.0.0.1 only): drive and inspect the
+// running game without restarting it. tools/regpuctl.py is its client; the commands are listed there.
 #include <cstdint>
 #include <string>
 

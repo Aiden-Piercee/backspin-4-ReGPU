@@ -93,7 +93,7 @@ void EnsureDevice()
     std::lock_guard lock(g_deviceMutex);
     if (g_device)
         return;
-    if (getenv("FM2_D3D12_DEBUG"))
+    if (getenv("REGPU_D3D12_DEBUG"))
     {
         ComPtr<ID3D12Debug> debug;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
@@ -111,7 +111,7 @@ void CreateWindowAndDevice()
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"fm2";
+    wc.lpszClassName = L"regpu";
     wc.hbrBackground = HBRUSH(GetStockObject(BLACK_BRUSH));
     wc.hIcon = HICON(LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
     RegisterClassW(&wc);
@@ -128,13 +128,13 @@ void CreateWindowAndDevice()
         // The picture (the swap chain) is a child window: the largest rectangle of the chosen
         // aspect ratio, centred. Other windows cannot cover the black bars this way.
         const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-        g_p.window = CreateWindowExW(0, L"fm2", L"Forza Motorsport 2", WS_POPUP | WS_VISIBLE, 0, 0, sw, sh, nullptr, nullptr, wc.hInstance, nullptr);
+        g_p.window = CreateWindowExW(0, L"regpu", GetSettings().windowTitle.c_str(), WS_POPUP | WS_VISIBLE, 0, 0, sw, sh, nullptr, nullptr, wc.hInstance, nullptr);
         LONG w = sw, h = sh;
         if (int64_t(sw) * outH > int64_t(sh) * outW)
             w = LONG(int64_t(sh) * outW / outH);
         else
             h = LONG(int64_t(sw) * outH / outW);
-        surface = CreateWindowExW(0, L"fm2", nullptr, WS_CHILD | WS_VISIBLE, (sw - w) / 2, (sh - h) / 2, w, h,
+        surface = CreateWindowExW(0, L"regpu", nullptr, WS_CHILD | WS_VISIBLE, (sw - w) / 2, (sh - h) / 2, w, h,
             g_p.window, nullptr, wc.hInstance, nullptr);
     }
     else
@@ -151,7 +151,7 @@ void CreateWindowAndDevice()
         }
         RECT r{ 0, 0, cw, ch };
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-        g_p.window = CreateWindowW(L"fm2", L"Forza Motorsport 2", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+        g_p.window = CreateWindowW(L"regpu", GetSettings().windowTitle.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
             r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
     }
 
@@ -309,7 +309,7 @@ void RenderThread()
 
 void PresenterInit()
 {
-    if (getenv("FM2_HEADLESS"))
+    if (getenv("REGPU_HEADLESS"))
         return;
     std::thread(RenderThread).detach();
 }

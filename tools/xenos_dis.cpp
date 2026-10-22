@@ -1,5 +1,5 @@
 // xenos_dis [--hlsl] <shader.bin>...: disassemble captured Xenos microcode
-// (vs_*.bin / ps_*.bin from FM2_DUMP_SHADERS); --hash prints each file with a hash of its
+// (vs_*.bin / ps_*.bin from REGPU_DUMP_SHADERS); --hash prints each file with a hash of its
 // translated HLSL (no compile: shaders with the same hash share bytecode); --hlsl translates and
 // compiles each one instead and reports the result.
 #include <cstdio>

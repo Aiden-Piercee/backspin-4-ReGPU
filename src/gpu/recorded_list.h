@@ -4,7 +4,7 @@
 // waits on the driver (which costs ~15% of it per draw). Same method names and arguments
 // as ID3D12GraphicsCommandList for the calls the renderer makes. Real() hands out the real
 // list once everything recorded so far has been replayed (for code that records on it
-// directly, and before Close/Execute). FM2_NO_RECORD_THREAD=1 calls the driver directly.
+// directly, and before Close/Execute). REGPU_NO_RECORD_THREAD=1 calls the driver directly.
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -23,7 +23,7 @@ public:
     void Init(ID3D12GraphicsCommandList* real, bool direct = false)
     {
         m_real = real;
-        m_direct = direct || getenv("FM2_NO_RECORD_THREAD") != nullptr;
+        m_direct = direct || getenv("REGPU_NO_RECORD_THREAD") != nullptr;
         if (!m_direct)
             std::thread([this] { Worker(); }).detach();
     }

@@ -46,6 +46,28 @@ struct ScannedShader
     std::vector<uint32_t> code;
 };
 
+// A resolve (an EDRAM copy to memory), as offered to Host::resolveWriteback.
+struct ResolveCopy
+{
+    uint32_t base;          // physical address of the image (its top-left; tiles land in one image)
+    uint32_t width, height; // the whole image, in game pixels
+    uint32_t format;        // the Xenos colour format it is stored as (6: 8888)
+    bool depth;             // a depth copy (written as the console stores D24FS8 in 32-bit words)
+    uint32_t samples;       // the EDRAM surface's MSAA: 1, 2 or 4
+    int32_t top, bottom;    // the rows this resolve covers (a tile of the image)
+};
+
+// Resolved images stay on the GPU; one the game reads on the CPU must also be written to memory.
+struct Writeback
+{
+    enum class Mode { None, Now, Deferred };
+    // Now: written before the game continues (a stall). Deferred: written when this frame's slot comes
+    // round again, a frame or two late, without a stall (for something read every frame).
+    Mode mode = Mode::None;
+    // Deferred only: the part of the image to write (game pixels); the default is all of it.
+    uint32_t x0 = 0, y0 = 0, x1 = ~0u, y1 = ~0u;
+};
+
 // What ReGPU needs from the game's runtime. Required unless marked optional.
 struct Host
 {
@@ -80,6 +102,9 @@ struct Host
     // debug tools print it); patched copies the title makes of it reuse the result. Returns a tag of
     // the game's choosing (0: none); draws using a tagged shader go to onDraw.
     uint32_t (*rewriteShader)(uint64_t hash, std::string& hlsl, bool pixel) = nullptr;
+    // Optional: which resolves to write back to memory, and how. Without it, the 8888 colour resolves
+    // whose size is listed in REGPU_RESOLVE_WRITEBACK ("WxH,WxH") are written at once.
+    Writeback (*resolveWriteback)(const ResolveCopy& copy) = nullptr;
     // Optional: a draw with a tagged shader (rewriteShader), before it is recorded. `c` is the vertex
     // shader's constants (as the title set them); `user` is four float4 the rewritten shaders can read
     // as vuser[0..3] (zero unless set here).

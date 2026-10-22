@@ -89,7 +89,7 @@ struct Gpu
 };
 
 Gpu g_gpu;
-bool g_trace = getenv("FM2_GPUTRACE") != nullptr;
+bool g_trace = getenv("REGPU_GPUTRACE") != nullptr;
 
 void RaiseInterrupt(uint32_t source, uint32_t cpu)
 {
@@ -107,7 +107,7 @@ void RaiseInterrupt(uint32_t source, uint32_t cpu)
 // writes (the worker keeps its own register file), shader loads (with their microcode),
 // draws, swaps, and the memory writes the title treats as fences, so those land only after
 // the draws before them. Waits, conditional writes and interrupts first let the worker
-// catch up. Opt-in with FM2_DRAW_THREAD=1: the worker alone still does nearly all the work
+// catch up. Opt-in with REGPU_DRAW_THREAD=1: the worker alone still does nearly all the work
 // (translation, not parsing, is the cost), so it pays off once draws are spread over workers.
 namespace work
 {
@@ -117,7 +117,7 @@ std::vector<uint32_t> g_ring(kWords);
 alignas(64) std::atomic<uint64_t> g_head{ 0 }; // written by the command processor
 alignas(64) std::atomic<uint64_t> g_tail{ 0 }; // written by the worker
 std::vector<uint8_t> g_file(0x8000 * 4);       // the worker's register file (registers up to 0x7FFF)
-const bool g_enabled = getenv("FM2_DRAW_THREAD") != nullptr; // off by default (no gain until draws translate in parallel)
+const bool g_enabled = getenv("REGPU_DRAW_THREAD") != nullptr; // off by default (no gain until draws translate in parallel)
 std::atomic<bool> g_started{ false };
 
 // Space for a record of `words` payload words; returns where to write it.
@@ -186,7 +186,7 @@ void WriteBackNow(uint32_t address, uint32_t value);
 // between them, plus a snapshot of the registers, shaders and tile state every 128 draws.
 // At the segment's end, it is cut at snapshots into pieces of about equal draw counts that
 // are translated on the draw workers into their own command lists, executed in order
-// (RendererRunPieces). FM2_DRAW_WORKERS=0 turns it off.
+// (RendererRunPieces). REGPU_DRAW_WORKERS=0 turns it off.
 namespace seg
 {
 enum : uint32_t { kRegs = 1, kShader, kDraw };
@@ -288,7 +288,7 @@ void Flush()
             parallel++;
             parallelDraws += g_draws;
         }
-        static LiveSwitch perf("FM2_PERF");
+        static LiveSwitch perf("REGPU_PERF");
         if (perf && std::chrono::steady_clock::now() - last > std::chrono::seconds(2))
         {
             last = std::chrono::steady_clock::now();
@@ -329,7 +329,7 @@ void Flush()
 
 bool Enabled()
 {
-    static const bool on = RendererDrawWorkers() > 0 && !getenv("FM2_DRAW_THREAD");
+    static const bool on = RendererDrawWorkers() > 0 && !getenv("REGPU_DRAW_THREAD");
     return on;
 }
 }
@@ -633,7 +633,7 @@ uint32_t ExecutePacket(uint32_t ptr)
 {
     const uint32_t header = LoadBE32(ptr);
     g_gpu.lastPacket.store(ptr, std::memory_order_relaxed); // diagnostics only: no fence per packet
-    static const int slow = getenv("FM2_GPUSLOW") ? atoi(getenv("FM2_GPUSLOW")) : 0;
+    static const int slow = getenv("REGPU_GPUSLOW") ? atoi(getenv("REGPU_GPUSLOW")) : 0;
     for (int i = 0; i < slow; i++)
         _mm_pause();
     switch (header >> 30)
@@ -694,9 +694,9 @@ uint32_t ExecutePacket(uint32_t ptr)
     const uint32_t opcode = (header >> 8) & 0x7F;
     const uint32_t data = ptr + 4;
     auto arg = [&](uint32_t i) { return LoadBE32(data + i * 4); };
-    static LiveSwitch tracePredication("FM2_TRACE_PRED");
+    static LiveSwitch tracePredication("REGPU_TRACE_PRED");
     static std::atomic<int> predLogged{ 0 };
-    if (tracePredication && (header & 1) && (g_gpu.binSelect != 0xFFFFFFFFull || g_gpu.binMask != 0xFFFFFFFFull) && predLogged++ < (getenv("FM2_TRACE_PRED_MAX") ? atoi(getenv("FM2_TRACE_PRED_MAX")) : 400))
+    if (tracePredication && (header & 1) && (g_gpu.binSelect != 0xFFFFFFFFull || g_gpu.binMask != 0xFFFFFFFFull) && predLogged++ < (getenv("REGPU_TRACE_PRED_MAX") ? atoi(getenv("REGPU_TRACE_PRED_MAX")) : 400))
         Log("pred: op %02X mask %016llX select %016llX -> %s", opcode, (unsigned long long)g_gpu.binMask, (unsigned long long)g_gpu.binSelect,
             (g_gpu.binSelect & g_gpu.binMask) ? "run" : "skip");
     if (tracePredication && opcode == 0x2D && (header & 1) && (g_gpu.binSelect & g_gpu.binMask) && predLogged < 100000000)
@@ -751,14 +751,14 @@ uint32_t ExecutePacket(uint32_t ptr)
         // Layout (little-endian dwords): Total A/B, ZFail A/B, ZPass A/B, StencilFail A/B.
         const bool end = (c[4] == finished && c[5] == finished) || (c[2] == finished && c[3] == finished);
         static int logged = 0;
-        if (logged < 12 && getenv("FM2_TRACE_ZPD"))
+        if (logged < 12 && getenv("REGPU_TRACE_ZPD"))
         {
             logged++;
             Log("zpd: %08X %08X %08X %08X %08X %08X %08X %08X%s", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], end ? " (end)" : "");
         }
         // Real counts when draws are recorded here in stream order (not with the draw thread
         // or workers, whose lists the query would not wrap): the sun flare fades behind trees.
-        static LiveSwitch fake("FM2_FAKE_OCCLUSION"); // A/B: the old fixed answer
+        static LiveSwitch fake("REGPU_FAKE_OCCLUSION"); // A/B: the old fixed answer
         const bool real = !fake && !work::Active() && !seg::Enabled();
         uint32_t samples = 1000;
         if (real && !end)
@@ -806,7 +806,7 @@ uint32_t ExecutePacket(uint32_t ptr)
         // Usually satisfied within microseconds by an interrupt handler:
         // spin, then yield, then sleep.
         const auto start = Clock::now();
-        static const int spinMs = getenv("FM2_CP_SPIN_MS") ? atoi(getenv("FM2_CP_SPIN_MS")) : 100;
+        static const int spinMs = getenv("REGPU_CP_SPIN_MS") ? atoi(getenv("REGPU_CP_SPIN_MS")) : 100;
         for (int tries = 0;; tries++)
         {
             const uint32_t value = (info & 0x10) ? ReadBack(arg(1)) : Reg(arg(1));
@@ -830,7 +830,7 @@ uint32_t ExecutePacket(uint32_t ptr)
             const auto us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count();
             g_gpu.waits++;
             g_gpu.waitMicros += us;
-            static LiveSwitch perf("FM2_PERF");
+            static LiveSwitch perf("REGPU_PERF");
             if (perf)
             {
                 // Time per wait target, logged every 2 s.
@@ -1078,7 +1078,7 @@ void LookaheadBuffer(uint32_t address, uint32_t dwords, int depth, LookState& st
 
 void GpuLookahead()
 {
-    static LiveSwitch off("FM2_NO_LOOKAHEAD");
+    static LiveSwitch off("REGPU_NO_LOOKAHEAD");
     if (off || work::Active() || !t_cpContext) // (only on the command processor thread: its stream and registers)
         return;
     constexpr uint32_t kFirst = 0x2000, kCount = 0x3000;
@@ -1131,7 +1131,7 @@ void CommandProcessorLoop(PPCContext& ctx)
             for (;;)
             {
                 Sleep(2000);
-                if (getenv("FM2_PERF"))
+                if (getenv("REGPU_PERF"))
                 {
                     static uint64_t lastBusy = 0;
                     FILETIME c, e, k, u;
@@ -1220,16 +1220,16 @@ void VblankLoop()
     auto next = Clock::now();
     for (;;)
     {
-        // The title presents on vblanks: every one in races, every second one in menus. It
+        // The title presents on vblanks: every one in gameplay, often every second one in menus. It
         // keeps game time by the clock, not by frames, so vblanks run at twice the frame cap
         // (120-720 Hz) and the limiter in VdSwap sets the frame rate for both.
         static const int64_t periodUs = [] {
-            const char* v = getenv("FM2_VBLANK_HZ");
+            const char* v = getenv("REGPU_VBLANK_HZ");
             const int hz = v ? std::clamp(atoi(v), 30, 1000) : std::clamp(int(FrameCap()) * 2, 120, 720);
             return int64_t(1000000 / hz);
         }();
         next += std::chrono::microseconds(periodUs);
-        static LiveSwitch coarse("FM2_COARSE_SLEEP"); // A/B: the old 1 ms sleeps
+        static LiveSwitch coarse("REGPU_COARSE_SLEEP"); // A/B: the old 1 ms sleeps
         if (coarse)
             std::this_thread::sleep_until(next);
         else
@@ -1438,13 +1438,13 @@ GUEST_EXPORT(VdSwap)
         Log("gpu: VdSwap #%llu", (unsigned long long)n);
     // Frame limiter (settings: max FPS, the display's refresh with vsync): the title's render
     // thread waits for its next frame slot. Vblanks run faster than the cap, so menus (which
-    // present every second vblank) and races (every vblank) both reach it.
+    // present every second vblank) and gameplay (every vblank) both reach it.
     static const int64_t minFrameUs = int64_t(1000000 / FrameCap());
     if (minFrameUs)
     {
         static auto next = Clock::now();
         const auto now = Clock::now();
-        static LiveSwitch coarse("FM2_COARSE_SLEEP");
+        static LiveSwitch coarse("REGPU_COARSE_SLEEP");
         if (next > now)
         {
             if (coarse)
