@@ -5,8 +5,10 @@
 #include "gpu/texture.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "gpu/regs.h"
+#include "live_switch.h"
 
 namespace
 {
@@ -21,6 +23,8 @@ enum Format : uint32_t
     k_DXT1 = 18,
     k_DXT2_3 = 19,
     k_DXT4_5 = 20,
+    k_16_16_16_16_FLOAT = 32, // half floats; uploaded as they are (lookup tables, HDR data)
+    k_DXN = 49,   // two interpolated channels (BC5): normal maps
     k_DXT5A = 59, // one interpolated channel (BC4-like), 8-byte blocks
 };
 
@@ -44,6 +48,8 @@ bool Info(uint32_t format, FormatInfo& out)
     case k_DXT2_3:
     case k_DXT4_5: out = { 4, 4 }; return true;
     case k_DXT5A: out = { 4, 3 }; return true;
+    case k_DXN: out = { 4, 4 }; return true;
+    case k_16_16_16_16_FLOAT: out = { 1, 3 }; return true;
     default: return false;
     }
 }
@@ -139,6 +145,21 @@ void DecodeBlock(uint32_t format, const uint8_t* b, uint8_t out[16][4])
             out[i][0] = out[i][1] = out[i][2] = out[i][3];
         return;
     }
+    if (format == k_DXN)
+    {
+        // Red block, then green (as BC5).
+        uint8_t red[16][4];
+        DecodeAlphaBlock(b, red);
+        DecodeAlphaBlock(b + 8, out);
+        for (int i = 0; i < 16; i++)
+        {
+            out[i][1] = out[i][3];
+            out[i][0] = red[i][3];
+            out[i][2] = 0;
+            out[i][3] = 255;
+        }
+        return;
+    }
     if (format == k_DXT1)
     {
         DecodeColorBlock(b, out, true);
@@ -181,6 +202,15 @@ void DecodeTexel(uint32_t format, const uint8_t* t, uint8_t* out)
 {
     switch (format)
     {
+    case k_16_16_16_16_FLOAT: // the 8-bit fallback (the native path keeps the floats): clamped to 0-1
+        for (int c = 0; c < 4; c++)
+        {
+            const uint16_t h = uint16_t(t[c * 2] | (t[c * 2 + 1] << 8));
+            const int e = (h >> 10) & 31;
+            const float f = e ? std::ldexp(1.0f + float(h & 1023) / 1024.0f, e - 15) : std::ldexp(float(h & 1023) / 1024.0f, -14);
+            out[c] = (h & 0x8000) ? 0 : uint8_t(std::min(f, 1.0f) * 255.0f + 0.5f);
+        }
+        break;
     case k_8:
         out[0] = out[1] = out[2] = t[0];
         out[3] = 255;
@@ -256,6 +286,8 @@ const char* TextureFormatName(uint32_t format)
     case k_DXT2_3: return "DXT3";
     case k_DXT4_5: return "DXT5";
     case k_DXT5A: return "DXT5A";
+    case k_DXN: return "DXN";
+    case k_16_16_16_16_FLOAT: return "16161616F";
     default:
     {
         static thread_local char name[8];
@@ -270,13 +302,16 @@ bool DecodeTexture(const TextureFetch& fetch, std::vector<uint8_t>& rgba)
     return DecodeTexture(fetch, GuestPtr<uint8_t>(GpuPhysToGuest(fetch.Address())), rgba);
 }
 
-// Packed mips (fetch dword 5 bit 11): a tiled texture whose smaller side is 16 texels or
+// Packed mips (fetch dword 5 bit 11): a texture whose smaller side is 16 texels or
 // less lies inside one 32x32-texel tile, at an offset (as Xenia's GetPackedMipOffset): the
 // wider side's first 16 texels, then the image. Returns the offset of mip 0 in blocks.
 void PackedMipOffset(const TextureFetch& fetch, uint32_t blockSize, uint32_t& xBlocks, uint32_t& yBlocks)
 {
     xBlocks = yBlocks = 0;
-    if (!fetch.Tiled() || !((fetch.dwords[5] >> 11) & 1))
+    // Linear textures too: PGR4's 8x6 car damage tables are linear with packed mips, their texels
+    // 16 to the right of the base (read from the base, every car looked fully damaged).
+    static LiveSwitch tiledOnly("REGPU_PACKED_TILED_ONLY"); // A/B: the old rule
+    if ((tiledOnly && !fetch.Tiled()) || !((fetch.dwords[5] >> 11) & 1))
         return;
     auto log2Ceil = [](uint32_t v) {
         uint32_t l = 0;
@@ -323,7 +358,7 @@ bool DecodeTexture(const TextureFetch& fetch, const uint8_t* source, std::vector
             if (fetch.Tiled())
                 offset = size_t(TiledOffset2DInner(bx + packX, by + packY, info.log2Bytes, rowOffset) >> info.log2Bytes) * blockBytes;
             else
-                offset = (size_t(by) * pitchBlocks + bx) * blockBytes;
+                offset = (size_t(by + packY) * pitchBlocks + bx + packX) * blockBytes;
             memcpy(block, source + offset, blockBytes);
             Swap(block, blockBytes, fetch.Endian());
             if (info.blockSize == 4)
@@ -380,6 +415,12 @@ size_t TextureSourceSize(const TextureFetch& fetch)
         pitchBlocks = (pitchBlocks + 31) & ~31u;
         rows = (rows + 31) & ~31u;
     }
+    else
+    {
+        uint32_t packX, packY; // a packed linear image lies below or right of the base
+        PackedMipOffset(fetch, info.blockSize, packX, packY);
+        rows += packY;
+    }
     return size_t(pitchBlocks) * rows * (size_t(1) << info.log2Bytes);
 }
 
@@ -391,6 +432,8 @@ uint32_t TextureBCKind(uint32_t format)
     case k_DXT2_3: return 2;
     case k_DXT4_5: return 3;
     case k_DXT5A: return 4;
+    case k_DXN: return 5;
+    case k_16_16_16_16_FLOAT: return 6; // not compressed: 1x1 "blocks" of 8 bytes
     default: return 0;
     }
 }
@@ -401,13 +444,14 @@ bool CopyTextureBlocks(const TextureFetch& fetch, uint8_t* dst, uint32_t dstRowP
     if (fetch.Type() != 2 || !TextureBCKind(fetch.Format()) || !Info(fetch.Format(), info))
         return false;
     const uint8_t* source = GuestPtr<uint8_t>(GpuPhysToGuest(fetch.Address()));
-    const uint32_t blocksX = (fetch.Width() + 3) / 4, blocksY = (fetch.Height() + 3) / 4;
+    const uint32_t bs = info.blockSize;
+    const uint32_t blocksX = (fetch.Width() + bs - 1) / bs, blocksY = (fetch.Height() + bs - 1) / bs;
     const uint32_t blockBytes = 1u << info.log2Bytes;
-    uint32_t pitchBlocks = std::max(fetch.Pitch() / 4, blocksX);
+    uint32_t pitchBlocks = std::max(fetch.Pitch() / bs, blocksX);
     if (fetch.Tiled())
         pitchBlocks = (pitchBlocks + 31) & ~31u;
     uint32_t packX, packY;
-    PackedMipOffset(fetch, 4, packX, packY);
+    PackedMipOffset(fetch, bs, packX, packY);
     for (uint32_t by = 0; by < blocksY; by++)
     {
         uint8_t* row = dst + size_t(by) * dstRowPitch;
@@ -415,7 +459,7 @@ bool CopyTextureBlocks(const TextureFetch& fetch, uint8_t* dst, uint32_t dstRowP
         for (uint32_t bx = 0; bx < blocksX; bx++)
         {
             const size_t offset = fetch.Tiled() ? size_t(TiledOffset2DInner(bx + packX, by + packY, info.log2Bytes, rowOffset) >> info.log2Bytes) * blockBytes
-                                                : (size_t(by) * pitchBlocks + bx) * blockBytes;
+                                                : (size_t(by + packY) * pitchBlocks + bx + packX) * blockBytes;
             // Swapped here, then written once: dst is upload memory (write-combined, never read).
             uint8_t block[16];
             memcpy(block, source + offset, blockBytes);

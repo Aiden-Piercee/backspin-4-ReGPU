@@ -782,6 +782,9 @@ uint64_t ContentHash(const uint8_t* data, size_t bytes, size_t stride = 256)
         h = (h ^ v) * 0xFF51AFD7ED558CCDull;
         return h ^ (h >> 32);
     };
+    static LiveSwitch fullHash("REGPU_FULL_CONTENT_HASH"); // A/B: every dword (finds stale cached copies)
+    if (fullHash)
+        stride = 4;
     uint64_t h = mix(0xCBF29CE484222325ull, bytes);
     for (size_t i = 0; i + 4 <= bytes; i += stride)
     {
@@ -3207,7 +3210,8 @@ ID3D12Resource* GetTextureLocked(const TextureFetch& fetch, DXGI_FORMAT& format,
     // DXT formats stay compressed on the GPU (BC1-BC4): no decode, a quarter to an eighth of
     // the upload. D3D12 needs block-aligned sizes; others are decoded to RGBA8.
     static LiveSwitch noNativeBC("REGPU_NO_NATIVE_BC");
-    const uint32_t bc = !noNativeBC && w % 4 == 0 && h % 4 == 0 && !forceDecode ? TextureBCKind(fetch.Format()) : 0;
+    const uint32_t kind = TextureBCKind(fetch.Format());
+    const uint32_t bc = !noNativeBC && ((w % 4 == 0 && h % 4 == 0) || kind == 6) && !forceDecode ? kind : 0;
     const uint8_t* source = GuestPtr<uint8_t>(GpuPhysToGuest(fetch.Address()));
     // The whole base level: the old guess (pitch * height / 2) covered only the first half of a
     // one-byte-per-texel texture (DXT5), so a thumbnail filled in later went unnoticed.
@@ -3258,9 +3262,10 @@ ID3D12Resource* GetTextureLocked(const TextureFetch& fetch, DXGI_FORMAT& format,
     if (bc)
     {
         static const DXGI_FORMAT bcFormats[] = { DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC3_UNORM,
-            DXGI_FORMAT_BC4_UNORM };
+            DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT };
         const DXGI_FORMAT bcFormat = bcFormats[bc];
-        const uint32_t blockBytes = bc == 1 || bc == 4 ? 8 : 16;
+        // Kind 6 (16_16_16_16_FLOAT) is uncompressed: blocks of one texel, 8 bytes.
+        const uint32_t blockBytes = bc == 1 || bc == 4 || bc == 6 ? 8 : 16, bs = bc == 6 ? 1 : 4;
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -3292,8 +3297,8 @@ ID3D12Resource* GetTextureLocked(const TextureFetch& fetch, DXGI_FORMAT& format,
         for (UINT16 l = 0; l < mipCount; l++)
         {
             const uint32_t lw = levels[l].Width(), lh = levels[l].Height();
-            const UINT rowPitch = (((lw + 3) / 4) * blockBytes + 255) & ~255u;
-            const UINT64 offset = RingAlloc(UINT64(rowPitch) * ((lh + 3) / 4), 512);
+            const UINT rowPitch = (((lw + bs - 1) / bs) * blockBytes + 255) & ~255u;
+            const UINT64 offset = RingAlloc(UINT64(rowPitch) * ((lh + bs - 1) / bs), 512);
             if (offset == ~0ull)
             {
                 NoteTextureFailure("upload ring full (compressed)", fetch);
@@ -3308,7 +3313,7 @@ ID3D12Resource* GetTextureLocked(const TextureFetch& fetch, DXGI_FORMAT& format,
             src.pResource = Frame().ring.Get();
             src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             src.PlacedFootprint.Offset = offset;
-            src.PlacedFootprint.Footprint = { bcFormat, (lw + 3) & ~3u, (lh + 3) & ~3u, 1, rowPitch };
+            src.PlacedFootprint.Footprint = { bcFormat, (lw + bs - 1) / bs * bs, (lh + bs - 1) / bs * bs, 1, rowPitch };
             C().list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         }
         b.Transition.pResource = cached.resource.Get();
@@ -6566,11 +6571,11 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         std::string tex;
         for (uint32_t slot = 0; slot < 32; slot++)
         {
-            if (((ps.info.usedTextureSlots >> slot) & 1) == 0)
+            if ((((ps.info.usedTextureSlots | vs.info.usedTextureSlots) >> slot) & 1) == 0)
                 continue;
             const TextureFetch t = ReadTextureFetch(slot);
             char e[160];
-            snprintf(e, sizeof(e), " t%u=%s %ux%u@%08X sw%03X sg%02X d%u [%08X %08X %08X %08X %08X %08X]", slot, TextureFormatName(t.Format()), t.Width(), t.Height(), t.Address(), t.Swizzle(),
+            snprintf(e, sizeof(e), " %st%u=%s %ux%u@%08X sw%03X sg%02X d%u [%08X %08X %08X %08X %08X %08X]", ((ps.info.usedTextureSlots >> slot) & 1) ? "" : "vs:", slot, TextureFormatName(t.Format()), t.Width(), t.Height(), t.Address(), t.Swizzle(),
                 (t.dwords[0] >> 2) & 0xFF, t.Dimension(), t.dwords[0], t.dwords[1], t.dwords[2], t.dwords[3], t.dwords[4], t.dwords[5]);
             tex += e;
         }
@@ -6592,6 +6597,14 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
                 if (c[0] != 0 || c[1] != 0 || c[2] != 0 || c[3] != 0)
                     Log("    vc%u = %g %g %g %g", i, c[0], c[1], c[2], c[3]);
             }
+        // The shader's fetches (VFetchK k): fetch constant, format, signed, normalised, stride, offset, exponent.
+        for (size_t k = 0; k < vs.info.vertexFetchLayout.size(); k++)
+        {
+            const auto& l = vs.info.vertexFetchLayout[k];
+            if (l[1] || l[0])
+                Log("    fetch %zu: vf%u format %u%s%s stride %u offset %u exp %d", k, l[0] & 0x7F, (l[0] >> 8) & 0x3F, (l[0] & 0x4000) ? " signed" : "",
+                    (l[0] & 0x8000) ? " norm" : "", l[1], l[2], int(l[3] << 10) >> 26);
+        }
         for (uint32_t k : vs.info.vertexFetchConstants)
         {
             const uint32_t d0 = gpureg::Get(gpureg::FetchConstants + k * 2), d1 = gpureg::Get(gpureg::FetchConstants + k * 2 + 1);
