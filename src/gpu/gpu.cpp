@@ -376,6 +376,7 @@ void SubmitDraw(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         {
             seg::Flush();
             FrameOnDraw(initiator, dmaBase, dmaSize);
+            RendererTileAfterResolve(seg::g_tile);
             return;
         }
         if (!seg::g_open || seg::g_draws % seg::kSnapEvery == 0)

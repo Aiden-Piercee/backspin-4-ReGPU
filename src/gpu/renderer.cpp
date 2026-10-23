@@ -138,9 +138,27 @@ uint32_t LayoutKey(uint32_t surface)
 }
 std::atomic<uint32_t>& NativeSlot(uint32_t key) { return g_nativeMsaa[(key ^ key >> 12) & 0xFFF]; }
 std::atomic<uint32_t> g_nativeMsaaGeneration{ 0 }; // bumped when an entry changes (BigPassSize's memo)
+// The frame each slot last saw an MSAA layout drawn, and the frame being drawn (set at the swap).
+std::atomic<uint64_t> g_nativeMsaaFrame[0x1000];
+std::atomic<uint64_t> g_layoutFrame{ 0 };
 void SetNativeMsaa(uint32_t key, uint32_t msaa)
 {
-    if (NativeSlot(key).exchange(key << 2 | msaa, std::memory_order_relaxed) != (key << 2 | msaa))
+    std::atomic<uint32_t>& slot = NativeSlot(key);
+    // A 1x view of an MSAA surface's EDRAM within a few frames of its MSAA draws (a full-screen
+    // pass after a tiled 2x scene, downsamples before the next, at the same base and row width)
+    // does not replace its layout: the scene's clears through 4x views, at the start of the next
+    // frame, are mapped by it. A 1x layout maps no views, so taking it over lost both their x scale
+    // and the lower tile's offset (Top Spin 4: half-cleared tiles, the lower one never drawn). A
+    // surface used only at 1x for longer takes the 1x layout as before.
+    static LiveSwitch keep("REGPU_NO_MSAA_LAYOUT_KEEP"); // A/B: the last view's layout wins
+    std::atomic<uint64_t>& msaaFrame = g_nativeMsaaFrame[(key ^ key >> 12) & 0xFFF];
+    const uint64_t frame = g_layoutFrame.load(std::memory_order_relaxed);
+    if (msaa)
+        msaaFrame.store(frame, std::memory_order_relaxed);
+    else if (!keep && slot.load(std::memory_order_relaxed) >> 2 == key && (slot.load(std::memory_order_relaxed) & 3) &&
+             msaaFrame.load(std::memory_order_relaxed) + 8 >= frame)
+        return;
+    if (slot.exchange(key << 2 | msaa, std::memory_order_relaxed) != (key << 2 | msaa))
         g_nativeMsaaGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 // The surface's MSAA layout when the current view is another one of an MSAA surface, else -1.
@@ -3663,6 +3681,7 @@ struct TileState
     uint32_t surface = ~0u; // RB_SURFACE_INFO of the tiled pass (~0: any)
 };
 thread_local TileState g_tile;
+thread_local bool g_tileResolved = false; // a resolve just ended a tile (RendererTileAfterResolve)
 static LiveSwitch g_noForeignTile("REGPU_NO_FOREIGN_TILE"); // A/B for the paint-editor tile fix
 
 // Tiling: each tile pass is shifted into EDRAM by the window offset and
@@ -3802,6 +3821,10 @@ void BlitResolve(bool depth, uint32_t base, uint32_t width, uint32_t height, DXG
     dest.frame = g_r.frame;
     const D3D12_RECT sr{ rect.left, rect.top, std::min<LONG>(rect.right, width), std::min<LONG>(rect.bottom, height) };
     FrameResources& f = Frame();
+    static LiveSwitch traceBlits("REGPU_TRACE_RESOLVES");
+    if (traceBlits)
+        Log("resolve blit: %08X %ux%u (texture %ux%u host %ux%u) rect %ld,%ld-%ld,%ld descriptors %u/%u", base, width, height, dest.width, dest.height,
+            dest.hostWidth, dest.hostHeight, sr.left, sr.top, sr.right, sr.bottom, f.descriptorsUsed, kDescriptorsPerFrame);
     if (sr.right <= sr.left || sr.bottom <= sr.top || f.descriptorsUsed >= kDescriptorsPerFrame)
         return;
 
@@ -4585,6 +4608,26 @@ void Resolve()
             WriteResolveToGuest(base, width, height, info);
         else if (request.mode == regpu::Writeback::Mode::Deferred && (depth || destFormat == 6))
             QueueDeferredWriteback(base, width, height, info, depth, rect, request);
+    }
+    // A tile's colour resolve ends it: the next tile starts at its bottom row. The next tile's
+    // first draws can be its clears, rectangles in tile-relative coordinates drawn before any
+    // draw sets the tile's window scissor (Top Spin 4 clears through a 4x view), so they land
+    // there; after the last tile nothing is tile-relative.
+    {
+        static LiveSwitch noNextTile("REGPU_NO_NEXT_TILE"); // A/B
+        const uint32_t pitch = gpureg::Get(RB_SURFACE_INFO) & 0x3FFF;
+        if (!noNextTile && sourceSelect < 4 && pitch >= kWidth && rect.left == 0 && rect.right >= LONG(kWidth) &&
+            (tile.top > 0 || tile.bottom < LONG(PassHeight())) && rect.bottom == tile.bottom)
+        {
+            if (rect.bottom < LONG(PassHeight()))
+            {
+                g_tile.originY = rect.bottom;
+                g_tile.rect = { tile.left, rect.bottom, tile.right, LONG(PassHeight()) };
+            }
+            else
+                g_tile = TileState{};
+            g_tileResolved = true;
+        }
     }
     // Clears after a tile's resolve prepare the EDRAM for the next tile, which
     // we draw lower on the same host surface: a full-width clear covers every
@@ -5758,6 +5801,18 @@ void RendererTrackTile(RendererTile& tile)
     }
 }
 
+void RendererTileAfterResolve(RendererTile& tile)
+{
+    if (!g_tileResolved)
+        return;
+    g_tileResolved = false;
+    tile.originY = g_tile.originY;
+    tile.rect[0] = g_tile.rect.left;
+    tile.rect[1] = g_tile.rect.top;
+    tile.rect[2] = g_tile.rect.right;
+    tile.rect[3] = g_tile.rect.bottom;
+}
+
 void RendererSetTile(const RendererTile& tile)
 {
     g_tile.originY = tile.originY;
@@ -6253,7 +6308,12 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         const uint32_t surface = gpureg::Get(RB_SURFACE_INFO), msaa = (surface >> 16) & 3;
         if ((initiator & 0x3F) != 8 || ps.info.usedTextureSlots || vs.info.usedTextureSlots)
         {
-            SetNativeMsaa(LayoutKey(surface), msaa);
+            // Not from a draw into a few pixels (occlusion queries: Top Spin 4 draws points into
+            // 16x16 through a 4x view of its 2x scene, which made the scene's clears look native).
+            static LiveSwitch noTinySkip("REGPU_NO_TINY_LAYOUT_SKIP"); // A/B
+            const D3D12_RECT s = WindowScissor();
+            if (noTinySkip || (s.right - s.left) * (s.bottom - s.top) > 64 * 64)
+                SetNativeMsaa(LayoutKey(surface), msaa);
         }
         else if (TallView())
         {
@@ -6464,14 +6524,28 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         // the 4x scene's three tiles, and clipped to the last tile it covered only the bottom
         // third (the rest of the picture was black).
         // Another MSAA view of the tiled surface itself (stencil clears of a composite) is still
-        // tile-relative.
-        else if (g_tile.originY != 0 && (g_tile.surface == ~0u || g_tile.surface == gpureg::Get(RB_SURFACE_INFO) || (!g_noForeignTile && ForeignNativeMsaa() >= 0)))
+        // tile-relative, for its texture-less rectangles (clears): a full-screen 1x pass over the
+        // same EDRAM after the tiles is not.
+        else if (g_tile.originY != 0 &&
+                 (g_tile.surface == ~0u || g_tile.surface == gpureg::Get(RB_SURFACE_INFO) ||
+                     (!g_noForeignTile && (initiator & 0x3F) == 8 && !ps.info.usedTextureSlots && !vs.info.usedTextureSlots && ForeignNativeMsaa() >= 0)))
         {
             shiftY = float(g_tile.originY + wy);
             scissor.left = std::max(scissor.left, g_tile.rect.left);
             scissor.top = std::max(scissor.top, g_tile.rect.top);
             scissor.right = std::min(scissor.right, g_tile.rect.right);
             scissor.bottom = std::min(scissor.bottom, g_tile.rect.bottom);
+        }
+    }
+    if ((initiator & 0x3F) == 8 && !ps.info.usedTextureSlots && !vs.info.usedTextureSlots)
+    {
+        static LiveSwitch traceRects("REGPU_TRACE_CLEARS");
+        if (traceRects)
+        {
+            const uint32_t surface = gpureg::Get(RB_SURFACE_INFO);
+            Log("rect draw: surface %08X colour %03X layout %08X (frame %llu) scale %g,%g shift %g scissor %ld,%ld-%ld,%ld tile origin %d",
+                surface, gpureg::Get(RB_COLOR_INFO) & 0xFFF, NativeSlot(LayoutKey(surface)).load(), (unsigned long long)g_layoutFrame.load(),
+                vc->vscale[3], vc->voffset[3], shiftY, scissor.left, scissor.top, scissor.right, scissor.bottom, g_tile.originY);
         }
     }
     const D3D12_VIEWPORT vp{ 0, shiftY * ScaleY(), float(PassWidth()) * ScaleX(), float(PassHeight()) * ScaleY(), 0, 1 };
@@ -7198,6 +7272,7 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
         }
     }
     ++g_r.frame;
+    g_layoutFrame.store(g_r.frame, std::memory_order_relaxed);
     DebugOnSwap(g_r.frame);
     if (int st = g_drawStats.load(); st) // drawstats: arm at one swap, stop at the next
         g_drawStats = st == 1 ? 2 : 0;

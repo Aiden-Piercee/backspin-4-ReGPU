@@ -46,6 +46,8 @@ bool RendererOcclusionEnd(uint32_t& samples);
 // Follows the tile state draws set (see DrawImpl), for the state at each piece's start.
 void RendererTrackTile(RendererTile& tile);
 void RendererSetTile(const RendererTile& tile);
+// After a resolve that ended a tile: the next tile's origin, for the state at the next piece's start.
+void RendererTileAfterResolve(RendererTile& tile);
 // Runs translate(i), i in [0, n), on the draw workers (and this thread), each into its own
 // command list, and executes them in order after everything recorded so far.
 void RendererRunPieces(uint32_t n, const std::function<void(uint32_t)>& translate);
