@@ -54,6 +54,24 @@ SamplerState sPointClamp : register(s2);
 SamplerState sPointWrap : register(s3);
 
 static const float FLT_MAX = 3.402823466e+38;
+// The depth-texture (shadow map) values a pixel shader read: the last, the least, the most
+// (REGPU_DIAG_SHADOW_SHOW).
+static float g_depthRead = -1.0, g_depthMin = 2.0, g_depthMax = -1.0;
+
+// 20e4 depth (D24FS8: 4-bit exponent, bias 15, 20-bit mantissa) to and from its 24 bits.
+uint Depth20e4Bits(float d)
+{
+    d = clamp(d, 0.0, 1.9999);
+    if (d < 6.103515625e-5) return uint(d * 16384.0 * 1048576.0 + 0.5);
+    int e = clamp(int(floor(log2(d))), -14, 0);
+    uint m = min(uint((d / exp2(float(e)) - 1.0) * 1048576.0 + 0.5), 0xFFFFFu);
+    return uint(e + 15) << 20 | m;
+}
+float Depth20e4Value(uint bits)
+{
+    uint e = (bits >> 20) & 15u, m = bits & 0xFFFFFu;
+    return e ? (1.0 + float(m) / 1048576.0) * exp2(float(e) - 15.0) : float(m) / 1048576.0 * 6.103515625e-5;
+}
 
 struct VSOut
 {
@@ -203,6 +221,19 @@ float4 TFetchRaw(uint slot, float3 coord, bool denorm, bool vertexStage, float b
 float4 TFetch(uint slot, float3 coord, bool denorm, bool vertexStage, float bias, float2 texel)
 {
     float4 v = TFetchRaw(slot, coord, denorm, vertexStage, bias, texel);
+    // Depth textures (tinfo.x bit 24, renderer.cpp): the shadow experiments' readings of the map.
+    uint ti = tinfo[slot].x;
+    if ((ti >> 24) & 1u)
+    {
+        if ((ti >> 20) & 1u) v = float4(1, 1, 1, 1);
+        if ((ti >> 21) & 1u) v = float4(0, 0, 0, 0);
+        if ((ti >> 25) & 1u) v.x = 1.0;
+        if ((ti >> 22) & 1u) v.x = float(Depth20e4Bits(v.x)) / 16777215.0;
+        if ((ti >> 23) & 1u) v.x = Depth20e4Value(uint(saturate(v.x) * 16777215.0 + 0.5));
+        g_depthRead = v.x;
+        g_depthMin = min(g_depthMin, v.x);
+        g_depthMax = max(g_depthMax, v.x);
+    }
     // Exponent adjust (fetch constant): texels scaled by 2^n, n in tinfo.x bits 8-13.
     int expAdjust = int(tinfo[slot].x << 18) >> 26;
     if (expAdjust != 0) v *= exp2(float(expAdjust));
@@ -919,9 +950,17 @@ TranslatedShader TranslateShader(const Shader& shader)
              "    // Positions the title gives in screen space (no viewport scale or offset: its\n"
              "    // rectangle clears and filter passes, authored for D3D9's integer pixel centres,\n"
              "    // e.g. -0.5 .. 255.5) must cover the last row and column too: shift by half a pixel.\n"
-             "    if ((vte.x & 0x30Fu) == 0x300u) p.xy += 0.5;\n"
-             "    // vscale.w/voffset.w: pixel scale of MSAA clear rectangles (renderer.cpp).\n"
+             "    // vscale.w/voffset.w: pixel scale of MSAA clear rectangles (renderer.cpp), applied before the\n"
+             "    // half-pixel shift: scaled after it, a 4x view's rectangle started a whole pixel in and left the\n"
+             "    // first row and column uncleared (vte.x bit 31, REGPU_OLD_CLEAR_SHIFT: the old order).\n"
+             "    // vte.x bit 30 (texture-less, upscaled surface): edges snapped to the guest pixels whose\n"
+             "    // centres they cover instead, so each host pixel takes its guest pixel's coverage.\n"
+             "    bool halfPixel = (vte.x & 0x30Fu) == 0x300u;\n"
+             "    bool snap = halfPixel && (vte.x & (1u << 30));\n"
+             "    if (snap) p.xy = ceil(p.xy);\n"
+             "    if (halfPixel && !snap && (vte.x & (1u << 31))) p.xy += 0.5;\n"
              "    if (vscale.w > 0.0) p.xy *= float2(vscale.w, voffset.w);\n"
+             "    if (halfPixel && !snap && !(vte.x & (1u << 31))) p.xy += 0.5;\n"
              "    p.xy += pointOffset;\n"
              "    if (vte.x & (1u << 8)) w = 1.0;\n"
              "    float2 ndc = float2(p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0);\n"
@@ -944,6 +983,10 @@ TranslatedShader TranslateShader(const Shader& shader)
              "    // Generated parameter: pixel position, point sprite coordinate.\n"
              "    if (pinfo.y < 16u) r[pinfo.y] = float4(input.pos.xy * pinfo2.yz, input.pcoord);\n";
         h += e.out;
+        // Shadow receivers (draws reading a depth texture, renderer.cpp): red, or the map value
+        // values read (red the last, green the least, blue the most; black: none read).
+        h += "    if (pinfo.z & 1u) oC[0] = float4(1, 0, 0, 1);\n"
+             "    if (pinfo.z & 2u) oC[0] = g_depthMax < 0.0 ? float4(0, 0, 0, 1) : float4(saturate(g_depthRead), saturate(g_depthMin), saturate(g_depthMax), 1);\n";
         h += "    switch (pinfo.x)\n    {\n"
              "    case 0: discard; break;\n"
              "    case 1: if (!(oC[0].a < pinfo2.x)) discard; break;\n"
@@ -954,6 +997,7 @@ TranslatedShader TranslateShader(const Shader& shader)
              "    case 6: if (!(oC[0].a >= pinfo2.x)) discard; break;\n"
              "    }\n"
              "    if (pinfo2.w > 0.0) oC[0].rgb = clamp(oC[0].rgb, 0.0, pinfo2.w); // 7e3 target range\n"
+             "    else if (pinfo2.w < 0.0) oC[0] = saturate(oC[0]); // fixed-point target\n"
              "    return oC[0];\n}\n";
     }
     result.hlsl = h;

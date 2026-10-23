@@ -180,8 +180,16 @@ void CreateWindowAndDevice()
             if (pick.found)
             {
                 const LONG w = r.right - r.left, h = r.bottom - r.top;
-                SetWindowPos(g_p.window, nullptr, pick.work.left + std::max<LONG>(0, (pick.work.right - pick.work.left - w) / 2),
-                    pick.work.top + std::max<LONG>(0, (pick.work.bottom - pick.work.top - h) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                LONG x = pick.work.left + std::max<LONG>(0, (pick.work.right - pick.work.left - w) / 2);
+                LONG y = pick.work.top + std::max<LONG>(0, (pick.work.bottom - pick.work.top - h) / 2);
+                // REGPU_WINDOW_SLOT=<n>: tiled instead, left to right then down, as many to a row as fit.
+                if (const char* slot = getenv("REGPU_WINDOW_SLOT"); slot && *slot)
+                {
+                    const LONG n = atoi(slot), columns = std::max<LONG>(1, (pick.work.right - pick.work.left) / w);
+                    x = pick.work.left + (n % columns) * w;
+                    y = pick.work.top + (n / columns) * h;
+                }
+                SetWindowPos(g_p.window, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
             }
         }
     }

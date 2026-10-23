@@ -85,6 +85,12 @@ void RuntimeInit(const std::filesystem::path& gameDir)
         Log("runtime: quit from the launcher");
         std::_Exit(0);
     }
+    // Side-by-side test instances: REGPU_WINDOW_TITLE names the window, REGPU_OUTPUT_SIZE=WxH
+    // sets its size (the window position: REGPU_MONITOR, REGPU_WINDOW_SLOT in presenter.cpp).
+    if (const wchar_t* title = _wgetenv(L"REGPU_WINDOW_TITLE"); title && *title)
+        GetSettings().windowTitle = title;
+    if (unsigned w = 0, h = 0; getenv("REGPU_OUTPUT_SIZE") && sscanf(getenv("REGPU_OUTPUT_SIZE"), "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180)
+        GetSettings().width = w, GetSettings().height = h;
     // Saves: one content folder per profile (profiles\<name>\content). Saves from before
     // profiles existed (the old shared content folder) become the default "Player" profile's.
     std::string folder;

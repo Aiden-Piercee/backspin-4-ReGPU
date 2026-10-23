@@ -15,6 +15,10 @@
 const std::filesystem::path& DocumentsUserDir()
 {
     static const std::filesystem::path dir = [] {
+        // TS4_USER_DIR=<folder>: another user folder (side-by-side test instances, each with its
+        // own saves and shader caches).
+        if (const wchar_t* own = _wgetenv(L"TS4_USER_DIR"); own && *own)
+            return std::filesystem::absolute(own);
         std::error_code ec;
         std::filesystem::path documents;
         PWSTR known = nullptr;
