@@ -2,6 +2,7 @@
 #include "indirect.h"
 
 #include <fstream>
+#include <mutex>
 #include <windows.h>
 #include <vector>
 #include <unordered_map>
@@ -52,37 +53,28 @@ uint32_t AllocZeroed(uint32_t size)
 // Shared across all loaded XEX/DLL modules in the process.
 uint32_t KernelVariable(uint32_t ordinal)
 {
+    static std::mutex s_mutex;
     static std::unordered_map<uint32_t, uint32_t> s_vars;
+    std::lock_guard lock(s_mutex);
     if (auto it = s_vars.find(ordinal); it != s_vars.end())
         return it->second;
 
+    // OBJECT_TYPE: Allocate, Free, Close, Delete, Parse procedures, DefaultObject (+0x14) and
+    // PoolTag (+0x18). DefaultObject 0 says the dispatcher header is at the start of the object
+    // body, which holds for all of these (waits on an object go through it, see GetGuestObject).
+    const auto objectType = [](uint32_t tag) {
+        const uint32_t type = AllocZeroed(0x40);
+        StoreBE32(type + 0x18, tag);
+        return type;
+    };
     uint32_t addr = 0;
     switch (ordinal)
     {
-    case 0x00E: // ExEventObjectType
-    {
-        addr = AllocZeroed(0x40);
-        StoreBE32(addr, 0x45766E74); // 'Evnt'
-        break;
-    }
-    case 0x017: // ExMutantObjectType
-    {
-        addr = AllocZeroed(0x40);
-        StoreBE32(addr, 0x4D75746E); // 'Mutn'
-        break;
-    }
-    case 0x01B: // ExThreadObjectType
-    {
-        addr = AllocZeroed(0x40);
-        StoreBE32(addr, 0x54687264); // 'Thrd', only compared by address
-        break;
-    }
-    case 0x01C: // ExTimerObjectType
-    {
-        addr = AllocZeroed(0x40);
-        StoreBE32(addr, 0x54696D72); // 'Timr'
-        break;
-    }
+    case 0x00E: addr = objectType(0x45766E74); break; // ExEventObjectType 'Evnt'
+    case 0x012: addr = objectType(0x4D757461); break; // ExMutantObjectType 'Muta'
+    case 0x017: addr = objectType(0x53656D61); break; // ExSemaphoreObjectType 'Sema'
+    case 0x01B: addr = objectType(0x54687265); break; // ExThreadObjectType 'Thre'
+    case 0x01C: addr = objectType(0x54696D65); break; // ExTimerObjectType 'Time'
     case 0x059: // KeDebugMonitorData
     case 0x266: // KeCertMonitorData
     case 0x1C1: // VdHSIOCalibrationLock
@@ -140,6 +132,15 @@ uint32_t KernelVariable(uint32_t ordinal)
     s_vars[ordinal] = addr;
     return addr;
 }
+}
+
+uint32_t KernelObjectType(uint32_t ordinal)
+{
+    return KernelVariable(ordinal);
+}
+
+namespace
+{
 
 void ResolveVariableImports(const uint8_t* xex, uint32_t textStart, uint32_t textEnd)
 {
