@@ -11,6 +11,28 @@ __pycache__/
 /build/
 /generated/
 /game
+game/
+_ext/
+
+# Build outputs and test instances
+build*/
+/shadowtest/
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
 *.log
 d3dcompiler_47.dll
+pipelines.bin
+pipelines.manifest
 
+# Game data
+*.xex
+*.arc
+*.xzp
+*.wmv
+
+# Screenshots and dumps left at the root
+/*.png
+/*.raw
