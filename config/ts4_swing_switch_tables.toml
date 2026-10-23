@@ -15191,3 +15191,37 @@ labels = [
     0x88B0D538,
 ]
 
+
+# ---- MISSED BY XENONANALYSE (tools/find_jump_tables.py) ----
+[[switch]]
+base = 0x885370B4
+r = 11
+default = 0x885373C8
+labels = [
+    0x88537514,
+    0x885375EC,
+    0x88537290,
+    0x88537244,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x88537724,
+    0x88537188,
+    0x8853711C,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x885373FC,
+    0x88537140,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x88536EF4,
+    0x885373C8,
+]
+

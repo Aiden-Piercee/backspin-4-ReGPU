@@ -35,6 +35,7 @@ if ($Prepare) {
         Get-Content "out\$n.config.txt"
         cmd /c "$tools\xenonrecomp\XenonAnalyse\XenonAnalyse.exe game\$($i.xex) config\${n}_switch_tables.toml > out\$n.analyse.log 2>&1"
         Get-Content "out\$n.analyse.log" | Select-Object -Last 8
+        cmd /c "py -3 -I tools\find_jump_tables.py out\$n.bin out\$n.sections config\${n}_switch_tables.toml --append > nul"
     }
     'Review out\*.config.txt and the config diffs, then run without -Prepare.'
     exit 0
@@ -50,6 +51,7 @@ foreach ($i in $images) {
     cmd /c "$tools\xenonrecomp\XenonRecomp\XenonRecomp.exe config\$n.toml $xr\XenonUtils\ppc_context.h > out\$n.recomp.log 2>&1"
     if ($LASTEXITCODE) { Get-Content "out\$n.recomp.log" -Tail 30; throw "XenonRecomp failed on $n" }
     Get-Content "out\$n.recomp.log" | Where-Object { $_ -notmatch '^Recompiling' } | Select-Object -Last 40
+    cmd /c "py -3 -I tools\patch_mftb.py $dir"
     cmd /c "py -3 -I tools\fallthrough.py $dir > out\$n.fallthrough.txt"
     $funcs = (Select-String "$dir\ppc_func_mapping.cpp" -Pattern '^\s*\{ 0x').Count
     $ft = (Get-Content "out\$n.fallthrough.txt").Count
