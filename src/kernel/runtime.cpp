@@ -64,6 +64,7 @@ double MeasureTsc()
 
 void GpuInit();
 void AudioInit();
+void XmaInit();
 
 void RuntimeInit(const std::filesystem::path& gameDir)
 {
@@ -104,6 +105,7 @@ void RuntimeInit(const std::filesystem::path& gameDir)
     PresenterInit();
     GpuInit();
     AudioInit();
+    XmaInit();
 }
 
 const std::filesystem::path& GameDir() { return g_gameDir; }
