@@ -500,14 +500,24 @@ GUEST_EXPORT(KeReleaseSemaphore)
 
 namespace
 {
-const uint32_t g_traceObject = [] {
-    const char* v = getenv("FM2_TRACE_OBJ");
-    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+// FM2_TRACE_OBJ=<hex>[,<hex>...]: who sets, resets and waits on these dispatcher objects.
+const std::vector<uint32_t> g_traceObjects = [] {
+    std::vector<uint32_t> v;
+    for (const char* p = getenv("FM2_TRACE_OBJ"); p && *p;)
+    {
+        v.push_back(uint32_t(strtoul(p, nullptr, 16)));
+        p = strchr(p, ',');
+        if (p)
+            p++;
+    }
+    return v;
 }();
+const uint32_t g_traceObject = g_traceObjects.empty() ? 0 : g_traceObjects[0];
+bool Traced(uint32_t address) { return std::find(g_traceObjects.begin(), g_traceObjects.end(), address) != g_traceObjects.end(); }
 
 void TraceObject(const char* what, uint32_t address, PPCContext& ctx)
 {
-    if (g_traceObject && address == g_traceObject)
+    if (!g_traceObjects.empty() && Traced(address))
         Log("obj %08X: %s by thread %u (lr %08llX)", address, what, CurrentGuestThreadId(), ctx.lr);
 }
 
@@ -549,7 +559,7 @@ GUEST_EXPORT(KeWaitForSingleObject)
     auto object = ObjectFromPointer(address);
     TraceObject("KeWaitForSingleObject", address, ctx);
     Return(ctx, WaitForObjects({ object }, false, TimeoutFromGuest(ctx.r7.u32)));
-    if (g_traceObject && g_traceObject == address && ctx.r3.u32 != X_STATUS_TIMEOUT)
+    if (!g_traceObjects.empty() && Traced(address) && ctx.r3.u32 != X_STATUS_TIMEOUT)
         Log("obj %08X: wait returned %X", address, ctx.r3.u32);
 }
 
@@ -558,7 +568,10 @@ GUEST_EXPORT(KeWaitForMultipleObjects)
     // (count, objects*, waitType, reason, mode, alertable, timeout*, waitBlocks*)
     std::vector<std::shared_ptr<KernelObject>> objects;
     for (uint32_t i = 0; i < ctx.r3.u32; i++)
+    {
         objects.push_back(ObjectFromPointer(LoadBE32(ctx.r4.u32 + i * 4)));
+        TraceObject("KeWaitForMultipleObjects", LoadBE32(ctx.r4.u32 + i * 4), ctx);
+    }
     Return(ctx, WaitForObjects(objects, ctx.r5.u32 == 0, TimeoutFromGuest(ctx.r9.u32)));
 }
 

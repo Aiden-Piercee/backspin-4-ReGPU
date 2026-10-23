@@ -2,6 +2,10 @@
 // host memory outside the guest's 4 GB, so module images and their tables cannot overlap.
 #include "indirect.h"
 
+#include <array>
+#include <atomic>
+#include <utility>
+
 #include <windows.h>
 
 #include "ppc_hooks.h"
@@ -9,9 +13,77 @@
 #include <ppc_context.h>
 
 #include "log.h"
+#include "memory.h"
 #include "recomp_modules.h"
 
 PPCHostFunc** g_indirectTable = nullptr;
+
+// FM2_TRACE_CALLS=addr[,addr...] (hex, up to 8): calls through the table to those guest
+// functions are logged, with the caller and the result. Direct calls between recompiled functions don't pass the table.
+namespace
+{
+constexpr int kTraceSlots = 8;
+uint32_t g_tracedAddress[kTraceSlots];
+PPCHostFunc* g_tracedHost[kTraceSlots];
+std::atomic<uint32_t> g_tracedCount[kTraceSlots];
+
+template <int N>
+void TracedCall(PPCContext& ctx, uint8_t* base)
+{
+    const uint32_t lr = uint32_t(ctx.lr), r3 = ctx.r3.u32, r4 = ctx.r4.u32, r5 = ctx.r5.u32;
+    g_tracedHost[N](ctx, base);
+    const uint32_t n = ++g_tracedCount[N];
+    // The first calls, then one every quarter second (sooner for another object).
+    static std::atomic<int64_t> last{ 0 };
+    static std::atomic<uint32_t> lastObject{ 0 };
+    const int64_t now = int64_t(GetTickCount64());
+    // (and every call whose result differs from the one before)
+    static std::atomic<uint32_t> lastResult{ 0 };
+    if (n > 16 && now - last <= 250 && (lastObject == r3 || now - last <= 20) && lastResult == ctx.r3.u32)
+        return;
+    lastResult = ctx.r3.u32;
+    last = now, lastObject = r3;
+    // The callers further up: the back chain from r1 (return addresses at frame - 8).
+    char chain[200] = "";
+    for (uint32_t frame = ctx.r1.u32, i = 0, at = 0; i < 8 && frame && (frame & 3) == 0; i++)
+    {
+        const uint32_t next = LoadBE32(frame);
+        if (next <= frame || next - frame > 0x100000)
+            break;
+        at += snprintf(chain + at, sizeof(chain) - at, " %08X", LoadBE32(next - 8));
+        frame = next;
+    }
+    Log("call %08X #%u from %08X (r3 %08X r4 %08X r5 %08X) -> %08X, thread %lu; callers%s", g_tracedAddress[N], n, lr, r3, r4, r5,
+        ctx.r3.u32, GetCurrentThreadId(), chain);
+}
+
+template <int... N>
+constexpr std::array<PPCHostFunc*, sizeof...(N)> TracedCalls(std::integer_sequence<int, N...>)
+{
+    return { &TracedCall<N>... };
+}
+
+void TraceCalls(PPCHostFunc** table)
+{
+    const char* list = getenv("FM2_TRACE_CALLS");
+    static constexpr auto calls = TracedCalls(std::make_integer_sequence<int, kTraceSlots>{});
+    for (int slot = 0; list && *list && slot < kTraceSlots;)
+    {
+        char* end = nullptr;
+        const uint32_t address = uint32_t(strtoul(list, &end, 16));
+        if (end == list)
+            break;
+        list = *end ? end + 1 : end;
+        PPCHostFunc*& entry = table[(address - kIndirectLow) / 4];
+        if (address < kIndirectLow || address >= kIndirectHigh || !entry)
+            continue;
+        g_tracedAddress[slot] = address;
+        g_tracedHost[slot] = entry;
+        entry = calls[slot++];
+        Log("indirect calls: tracing calls to %08X", address);
+    }
+}
+}
 
 void PPCIndirectMiss(uint32_t address)
 {
@@ -45,6 +117,7 @@ void IndirectInit()
         Log("indirect calls: %s, %zu functions", m.guestPath, count);
         mapped += count;
     }
+    TraceCalls(table);
     g_indirectTable = table;
     Log("indirect calls: %zu functions in %zu images", mapped, g_recompiledModuleCount);
 }
