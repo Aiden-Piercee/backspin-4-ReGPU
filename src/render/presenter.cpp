@@ -161,6 +161,29 @@ void CreateWindowAndDevice()
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
         g_p.window = CreateWindowW(L"regpu", GetSettings().windowTitle.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
             r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
+        // REGPU_MONITOR=<n>: centre the window on monitor n (1 the primary, 2 and up the others).
+        if (const char* m = getenv("REGPU_MONITOR"); m && atoi(m) > 0)
+        {
+            struct Pick { int want, seen; RECT work; bool found; } pick{ atoi(m), 1, {}, false };
+            EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR mon, HDC, LPRECT, LPARAM p) -> BOOL {
+                auto& k = *reinterpret_cast<Pick*>(p);
+                MONITORINFO mi{ sizeof(mi) };
+                GetMonitorInfoW(mon, &mi);
+                const int index = (mi.dwFlags & MONITORINFOF_PRIMARY) ? 1 : ++k.seen;
+                if (index == k.want)
+                {
+                    k.work = mi.rcWork;
+                    k.found = true;
+                }
+                return TRUE;
+            }, LPARAM(&pick));
+            if (pick.found)
+            {
+                const LONG w = r.right - r.left, h = r.bottom - r.top;
+                SetWindowPos(g_p.window, nullptr, pick.work.left + std::max<LONG>(0, (pick.work.right - pick.work.left - w) / 2),
+                    pick.work.top + std::max<LONG>(0, (pick.work.bottom - pick.work.top - h) / 2), 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            }
+        }
     }
     ShowWindow(g_p.window, SW_SHOWNORMAL);
     ShowWindow(g_p.window, SW_SHOW);
