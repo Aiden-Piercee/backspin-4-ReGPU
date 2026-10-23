@@ -35,6 +35,7 @@ struct FileObject : KernelObject
     bool directory = false;
     bool synchronous = true; // FILE_SYNCHRONOUS_IO_*: otherwise overlapped
     uint64_t position = 0;
+    uint64_t limit = ~0ull; // the file seems to end here (TS4_SKIP_INTRO's shortened movies)
 
     // NtQueryDirectoryFile state.
     std::vector<fs::directory_entry> entries;
@@ -258,6 +259,21 @@ uint32_t OpenFile(uint32_t handleOut, uint32_t access, uint32_t attributes, uint
         return X_STATUS_OBJECT_PATH_NOT_FOUND;
     }
 
+    // TS4_SKIP_INTRO (on unless set to 0): the 2K Sports movie and the attract video end right
+    // after they start, so the game goes on to the title. They are cut to their ASF header and
+    // first packets: when one is missing the game asks for it again forever.
+    static const bool skipIntro = [] {
+        const char* v = getenv("TS4_SKIP_INTRO");
+        return !v || strcmp(v, "0") != 0;
+    }();
+    bool shorten = false;
+    if (skipIntro)
+    {
+        std::string name = Lower(host.filename().string());
+        const auto starts = [&](const char* p) { return name.rfind(p, 0) == 0; };
+        shorten = (starts("2ksports_movie_") || starts("attract_")) && name.size() > 4 && name.compare(name.size() - 4, 4, ".wmv") == 0;
+    }
+
     const bool wantDirectory = options & 0x1;   // FILE_DIRECTORY_FILE
     const bool wantFile = options & 0x40;       // FILE_NON_DIRECTORY_FILE
     std::error_code ec;
@@ -325,6 +341,30 @@ uint32_t OpenFile(uint32_t handleOut, uint32_t access, uint32_t attributes, uint
         }
     }
 
+    if (shorten && !file->directory)
+    {
+        // ASF: the Header Object (its size at +16) holds the File Properties Object, whose
+        // minimum packet size is at +92; the Data Object's own header is 50 bytes.
+        static const uint8_t kFileProperties[16] = { 0xA1, 0xDC, 0xAB, 0x8C, 0x47, 0xA9, 0xCF, 0x11, 0x8E, 0xE4, 0x00, 0xC0, 0x0C, 0x20, 0x53, 0x65 };
+        std::vector<uint8_t> head(0x10000);
+        DWORD got = 0;
+        OVERLAPPED ov{};
+        if (ReadFile(file->host, head.data(), DWORD(head.size()), &got, &ov) && got >= 30)
+        {
+            uint64_t headerSize = 0;
+            memcpy(&headerSize, head.data() + 16, 8);
+            for (size_t i = 30; headerSize < got && i + 100 <= headerSize; i++)
+            {
+                if (memcmp(head.data() + i, kFileProperties, 16) != 0)
+                    continue;
+                uint32_t packet = 0;
+                memcpy(&packet, head.data() + i + 92, 4);
+                file->limit = headerSize + 50 + uint64_t(packet) * 2;
+                Log("vfs: TS4_SKIP_INTRO: %s cut to %llu bytes", guest.c_str(), (unsigned long long)file->limit);
+                break;
+            }
+        }
+    }
     StoreBE32(handleOut, CreateHandle(file));
     static LiveSwitch trace("FM2_TRACE_FILES");
     if (trace)
@@ -405,7 +445,8 @@ GUEST_EXPORT(NtReadFile)
         extern uint32_t g_binkRingBase;
         g_binkRingBase = buffer - uint32_t(offset % 0x200000);
     }
-    const BOOL ok = ReadFile(file->host, GuestPtr(buffer), length, &read, &ov);
+    const uint32_t wanted = offset >= file->limit ? 0 : uint32_t(std::min<uint64_t>(length, file->limit - offset));
+    const BOOL ok = wanted ? ReadFile(file->host, GuestPtr(buffer), wanted, &read, &ov) : (SetLastError(ERROR_HANDLE_EOF), FALSE);
     file->position = offset + read;
     g_readBytes += read;
     // Music files: their packets are noted, so the audio can tell music from effects (xma.cpp).
@@ -493,6 +534,7 @@ GUEST_EXPORT(NtQueryInformationFile)
     }
     HostInfo h;
     QueryHostInfo(file->path, h);
+    h.size = std::min<uint64_t>(h.size, file->limit);
     uint32_t written = 0;
     switch (cls)
     {
