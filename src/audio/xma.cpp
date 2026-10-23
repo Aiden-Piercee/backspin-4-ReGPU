@@ -19,6 +19,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -28,6 +30,7 @@
 #include "kernel/imports.h"
 #include "log.h"
 #include "memory.h"
+#include "precise_sleep.h"
 
 namespace
 {
@@ -237,7 +240,12 @@ struct State
     // The decoded frame being written out (big-endian 16-bit, interleaved), and how far.
     std::array<uint8_t, kSamplesPerFrame * 2 * 2> frame{};
     uint32_t frameBlocks = 0, frameAt = 0;
-    uint32_t kicks = 0, works = 0; // TS4_TRACE_XMA
+    // TS4_TRACE_XMA: what happened since the last report. Input buffers used up here and armed
+    // (made valid) by the title, passes with no valid input or that filled the output ring.
+    uint32_t kicks = 0, works = 0, frames = 0, waits = 0, used = 0, armed = 0, starved = 0, full = 0;
+    int peak = 0;
+    uint32_t lastValid = 0; // the input valid bits as the last pass saw or left them
+    bool music = false;     // its input came from a music file read
 };
 std::array<State, kContextCount> g_state{};
 void* g_packet = nullptr;
@@ -245,6 +253,33 @@ void* g_frame = nullptr;
 // TS4_TRACE_XMA=1: every few seconds, what was decoded.
 uint64_t g_statFrames = 0, g_statFailed = 0, g_statWaits = 0;
 int g_statPeak = 0, g_statLastError = 0;
+// TS4_XMA_606=rotate: the current-context register only ever shows a rotating index, never a
+// busy context, as Xenia (and the ReXGlue build) do. TS4_XMA_CONTINUOUS=1: a kicked context
+// stays enabled, and is decoded into whenever it has room, until it is locked or cleared.
+// TS4_XMA_POLL_US=n: the decoder looks for kicks every n microseconds instead of every 1 ms.
+bool EnvOn(const char* name)
+{
+    const char* v = getenv(name);
+    return v && *v && strcmp(v, "0") != 0;
+}
+const bool g_rotate = getenv("TS4_XMA_606") && strcmp(getenv("TS4_XMA_606"), "rotate") == 0;
+const bool g_continuous = EnvOn("TS4_XMA_CONTINUOUS");
+const int g_pollUs = getenv("TS4_XMA_POLL_US") ? atoi(getenv("TS4_XMA_POLL_US")) : 0;
+const bool g_trace = EnvOn("TS4_TRACE_XMA");
+// The physical ranges the last few music file reads went to (kernel/imports_io.cpp), so the
+// trace can tell the music's context from the effects'.
+std::mutex g_musicMutex;
+std::array<std::pair<uint32_t, uint32_t>, 8> g_musicReads{};
+uint32_t g_musicNext = 0;
+bool IsMusicBuffer(uint32_t phys)
+{
+    phys &= 0x1FFFFFFF;
+    std::lock_guard lock(g_musicMutex);
+    for (const auto& [start, end] : g_musicReads)
+        if (phys - start < end - start)
+            return true;
+    return false;
+}
 uint64_t g_traceContexts = 0; // TS4_TRACE_XMA_CONTEXT=n[,n...]: every frame and pass of those contexts (below 64)
 bool Traced(uint32_t index) { return index < 64 && (g_traceContexts >> index & 1); }
 
@@ -342,6 +377,7 @@ void DecodeFrame(State& s, const uint8_t* bits, uint32_t at, uint32_t length)
     s.frameBlocks = kBlocksPerFrame * s.channels;
     s.frameAt = 0;
     g_statFrames++;
+    s.frames++;
     if (!s.decoder || av::newPacket(g_packet, int(kBytesPerPacket)) < 0)
         return;
     uint8_t* packet = av::At<uint8_t*>(g_packet, av::kPacketData);
@@ -380,6 +416,7 @@ void DecodeFrame(State& s, const uint8_t* bits, uint32_t at, uint32_t length)
                     const float v = format == av::kSampleFmtFltp ? planes[c][i] : planes[0][i * s.channels + c];
                     const int x = int(std::lround(std::clamp(v, -1.0f, 1.0f) * 32767.0f));
                     g_statPeak = std::max(g_statPeak, std::abs(x));
+                    s.peak = std::max(s.peak, std::abs(x));
                     *out++ = uint8_t(x >> 8);
                     *out++ = uint8_t(x);
                 }
@@ -456,6 +493,7 @@ bool NextFrame(uint32_t index, State& s, Fields& f)
         if (bit + kBitsPerFrameHeader > kMaxFrameBits && !nextAddress)
         {
             g_statWaits++;
+            s.waits++;
             return false;
         }
         const uint32_t length = PeekBits(data, bit, kBitsPerFrameHeader);
@@ -472,6 +510,7 @@ bool NextFrame(uint32_t index, State& s, Fields& f)
         if (end > kMaxFrameBits && !nextAddress)
         {
             g_statWaits++;
+            s.waits++;
             return false;
         }
         DecodeFrame(s, data, bit, length);
@@ -517,6 +556,17 @@ void Work(uint32_t index)
     for (int i = 0; i < 5; i++)
         f.d[i] = LoadBE32(context + i * 4);
     const Fields start = f;
+    const uint32_t valid = Bits(f.d[0], 20, 2);
+    s.armed += __builtin_popcount(valid & ~s.lastValid);
+    s.lastValid = valid;
+    if (!valid)
+        s.starved++;
+    if (!s.music && (IsMusicBuffer(LoadBE32(context + 20)) || IsMusicBuffer(LoadBE32(context + 24))))
+    {
+        s.music = true;
+        if (g_trace)
+            Log("xma: ctx %u plays music", index);
+    }
     if (!Bits(f.d[1], 31, 1))
         return; // no output buffer
     const int channels = Bits(f.d[1], 29, 1) ? 2 : 1;
@@ -571,7 +621,9 @@ void Work(uint32_t index)
     now0 = SetBits(now0, 12, 8, Bits(f.d[0], 12, 8));
     now0 = SetBits(now0, 27, 5, writeBlock);
     if (writeBlock == readBlock)
-        now1 = SetBits(now1, 31, 1, 0); // full (or nothing to decode into an empty ring)
+        now1 = SetBits(now1, 31, 1, 0), s.full++; // full (or nothing to decode into an empty ring)
+    s.used += __builtin_popcount(valid & ~Bits(f.d[0], 20, 2));
+    s.lastValid = Bits(now0, 20, 2);
     StoreBE32(context, now0);
     StoreBE32(context + 4, now1);
     StoreBE32(context + 8, SetBits(LoadBE32(context + 8), 0, 26, f.Read()));
@@ -585,9 +637,15 @@ void Work(uint32_t index)
 void DecoderLoop()
 {
     SetThreadDescription(GetCurrentThread(), L"xma decoder");
+    Log("xma: current-context register %s, %s, polled every %d us", g_rotate ? "rotating" : "busy while decoding",
+        g_continuous ? "kicked contexts stay enabled" : "one pass per kick", g_pollUs > 0 ? g_pollUs : 1000);
+    uint32_t rotating = 1;
     for (;;)
     {
-        Sleep(1);
+        if (g_pollUs > 0)
+            PreciseSleepUntil(std::chrono::steady_clock::now() + std::chrono::microseconds(g_pollUs));
+        else
+            Sleep(1);
         std::lock_guard lock(g_mutex);
         for (uint32_t group = 0; group < kContextCount / 32; group++)
         {
@@ -599,6 +657,8 @@ void DecoderLoop()
                 const uint32_t index = group * 32 + bit;
                 if (clear >> bit & 1)
                 {
+                    if (g_trace && g_state[index].music)
+                        Log("xma: ctx %u (music) cleared", index);
                     Clear(g_array + index * kContextSize);
                     ResetState(g_state[index]);
                     g_state[index].enabled = false;
@@ -616,15 +676,17 @@ void DecoderLoop()
                 // audio pass, after consuming output and refilling input. Busy first, then the
                 // lock checked again: a title locking it now waits for the pass to end, and one
                 // that locked it already has its copy taken and gets the context as it was.
-                g_state[i].enabled = false;
-                Register(kRegCurrentContext).store(kBusy | i);
+                if (!g_continuous)
+                    g_state[i].enabled = false;
+                if (!g_rotate)
+                    Register(kRegCurrentContext).store(kBusy | i);
                 if (Register(kRegLock + i / 32).load() >> (i % 32) & 1)
                     continue;
                 g_state[i].works++;
                 Work(i);
             }
-        Register(kRegCurrentContext).store(0);
-        static const bool trace = getenv("TS4_TRACE_XMA") != nullptr;
+        Register(kRegCurrentContext).store(g_rotate ? (rotating = (rotating + 1) % kContextCount) : 0);
+        const bool trace = g_trace;
         static auto lastStat = std::chrono::steady_clock::now();
         if (trace && std::chrono::steady_clock::now() - lastStat > std::chrono::seconds(3))
         {
@@ -635,17 +697,20 @@ void DecoderLoop()
             Log("xma: %u active contexts, %llu frames (%llu failed, last error %d), peak %d, %llu waits for input", active,
                 (unsigned long long)g_statFrames, (unsigned long long)g_statFailed, g_statLastError, g_statPeak,
                 (unsigned long long)g_statWaits);
+            // Every music context, and the stereo ones that ran; the rest only count above.
             for (uint32_t i = 0; i < kContextCount; i++)
             {
-                if (!g_used[i])
-                    continue;
+                State& st = g_state[i];
                 const uint32_t c = g_array + i * kContextSize;
                 const uint32_t d0 = LoadBE32(c), d1 = LoadBE32(c + 4), d2 = LoadBE32(c + 8), d4 = LoadBE32(c + 16);
-                Log("xma:   context %u: in0 %u pkts valid %u, in1 %u pkts valid %u, current %u, read %u, out %u blocks w%u r%u valid %u, %s, "
-                    "kicks %u",
-                    i, Bits(d0, 0, 12), Bits(d0, 20, 1), Bits(d1, 0, 12), Bits(d0, 21, 1), Bits(d4, 31, 1), Bits(d2, 0, 26), Bits(d0, 22, 5),
-                    Bits(d0, 27, 5), Bits(LoadBE32(c + 36), 0, 5), Bits(d1, 31, 1), Bits(d1, 29, 1) ? "stereo" : "mono", g_state[i].kicks);
-                g_state[i].kicks = g_state[i].works = 0;
+                if (g_used[i] && (st.music || (Bits(d1, 29, 1) && (st.kicks || st.works))))
+                    Log("xma:   ctx %u%s: kicks %u passes %u frames %u peak %d | buffers used %u armed %u, waits %u, starved %u, full %u | "
+                        "in0 %u pkts v%u, in1 %u pkts v%u, cur %u, read %u, out w%u r%u of %u v%u, %s",
+                        i, st.music ? " MUSIC" : "", st.kicks, st.works, st.frames, st.peak, st.used, st.armed, st.waits, st.starved, st.full,
+                        Bits(d0, 0, 12), Bits(d0, 20, 1), Bits(d1, 0, 12), Bits(d0, 21, 1), Bits(d4, 31, 1), Bits(d2, 0, 26), Bits(d0, 27, 5),
+                        Bits(LoadBE32(c + 36), 0, 5), Bits(d0, 22, 5), Bits(d1, 31, 1), Bits(d1, 29, 1) ? "stereo" : "mono");
+                st.kicks = st.works = st.frames = st.waits = st.used = st.armed = st.starved = st.full = 0;
+                st.peak = 0;
             }
             g_statFrames = g_statFailed = g_statWaits = 0;
             g_statPeak = 0;
@@ -688,6 +753,7 @@ GUEST_EXPORT(XMACreateContext)
         if (g_used[i])
             continue;
         g_used[i] = true;
+        g_state[i].music = false;
         ResetState(g_state[i]);
         g_state[i].enabled = false;
         memset(GuestPtr(g_array + i * kContextSize), 0, kContextSize);
@@ -705,6 +771,9 @@ GUEST_EXPORT(XMAReleaseContext)
     const uint32_t index = ((ctx.r3.u32 & 0x1FFFFFFF) - (g_array & 0x1FFFFFFF)) / kContextSize;
     if (index < kContextCount)
     {
+        if (g_trace && g_state[index].music)
+            Log("xma: ctx %u (music) released", index);
+        g_state[index].music = false;
         g_used[index] = false;
         ResetState(g_state[index]);
         g_state[index].enabled = false;
@@ -713,3 +782,15 @@ GUEST_EXPORT(XMAReleaseContext)
     Return(ctx, 0);
 }
 
+
+// A music file read (kernel/imports_io.cpp) went to these bytes.
+void AudioNoteMusicRead(const std::filesystem::path& file, uint64_t offset, const uint8_t* data, uint32_t bytes)
+{
+    const uint32_t start = GuestAddr(data) & 0x1FFFFFFF;
+    {
+        std::lock_guard lock(g_musicMutex);
+        g_musicReads[g_musicNext++ % g_musicReads.size()] = { start, start + bytes };
+    }
+    if (g_trace)
+        Log("xma: music read %s offset %llu, %u bytes -> %08X", file.filename().string().c_str(), (unsigned long long)offset, bytes, GuestAddr(data));
+}
