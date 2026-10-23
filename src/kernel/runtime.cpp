@@ -129,6 +129,15 @@ void CompleteOverlapped(uint32_t overlapped, uint32_t result, uint32_t extendedE
 {
     if (!overlapped)
         return;
+    if (result != 0 && extendedError == 0)
+    {
+        extendedError = 0x80070000u | (result & 0xFFFFu);
+        result = X_ERROR_FUNCTION_FAILED;
+    }
+    else if (extendedError != 0 && (extendedError & 0x80000000u) == 0)
+    {
+        extendedError |= 0x80070000u;
+    }
     StoreBE32(overlapped + 0x00, result);
     StoreBE32(overlapped + 0x04, length);
     StoreBE32(overlapped + 0x18, extendedError);
@@ -144,8 +153,19 @@ void CompleteOverlapped(uint32_t overlapped, uint32_t result, uint32_t extendedE
             SignalObjectsChanged();
         }
     }
-    if (LoadBE32(overlapped + 0x10))
-        LOG_ONCE("XOVERLAPPED completion routines are not called yet");
+    if (const uint32_t completionRoutine = LoadBE32(overlapped + 0x10))
+    {
+        if (auto* thread = CurrentGuestThread(); thread && thread->ctx)
+        {
+            PPCContext cbCtx = *thread->ctx;
+            cbCtx.r1.u32 -= 0x100;
+            StoreBE32(cbCtx.r1.u32, thread->ctx->r1.u32);
+            cbCtx.r3.u64 = result;
+            cbCtx.r4.u64 = length;
+            cbCtx.r5.u64 = overlapped;
+            GuestCall(cbCtx, completionRoutine);
+        }
+    }
 }
 
 void TraceImport(const char* name, PPCContext& ctx)

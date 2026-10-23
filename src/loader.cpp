@@ -4,6 +4,7 @@
 #include <fstream>
 #include <windows.h>
 #include <vector>
+#include <unordered_map>
 
 #include <ppc_config.h>
 #include <ppc_context.h>
@@ -48,57 +49,96 @@ uint32_t AllocZeroed(uint32_t size)
 }
 
 // Guest storage for a kernel variable export, by xboxkrnl ordinal.
+// Shared across all loaded XEX/DLL modules in the process.
 uint32_t KernelVariable(uint32_t ordinal)
 {
+    static std::unordered_map<uint32_t, uint32_t> s_vars;
+    if (auto it = s_vars.find(ordinal); it != s_vars.end())
+        return it->second;
+
+    uint32_t addr = 0;
     switch (ordinal)
     {
+    case 0x00E: // ExEventObjectType
+    {
+        addr = AllocZeroed(0x40);
+        StoreBE32(addr, 0x45766E74); // 'Evnt'
+        break;
+    }
+    case 0x017: // ExMutantObjectType
+    {
+        addr = AllocZeroed(0x40);
+        StoreBE32(addr, 0x4D75746E); // 'Mutn'
+        break;
+    }
     case 0x01B: // ExThreadObjectType
     {
-        const uint32_t type = AllocZeroed(0x40);
-        StoreBE32(type, 0x54687264); // 'Thrd', only compared by address
-        return type;
+        addr = AllocZeroed(0x40);
+        StoreBE32(addr, 0x54687264); // 'Thrd', only compared by address
+        break;
+    }
+    case 0x01C: // ExTimerObjectType
+    {
+        addr = AllocZeroed(0x40);
+        StoreBE32(addr, 0x54696D72); // 'Timr'
+        break;
     }
     case 0x059: // KeDebugMonitorData
     case 0x266: // KeCertMonitorData
     case 0x1C1: // VdHSIOCalibrationLock
-        return AllocZeroed(0x100);
+        addr = AllocZeroed(0x100);
+        break;
     case 0x0AD: // KeTimeStampBundle: InterruptTime, SystemTime, TickCount
-        g_title.keTimeStampBundle = AllocZeroed(0x18);
-        return g_title.keTimeStampBundle;
+        if (!g_title.keTimeStampBundle)
+            g_title.keTimeStampBundle = AllocZeroed(0x18);
+        addr = g_title.keTimeStampBundle;
+        break;
     case 0x1AE: // ExLoadedCommandLine
     {
-        const uint32_t s = AllocZeroed(0x100);
-        strcpy(GuestPtr<char>(s), "\"default.xex\"");
-        return s;
+        addr = AllocZeroed(0x100);
+        strcpy(GuestPtr<char>(addr), "\"default.xex\"");
+        break;
     }
     case 0x193: // XexExecutableModuleHandle: pointer to the module handle
     {
-        const uint32_t p = AllocZeroed(4);
-        StoreBE32(p, g_title.ldrEntry);
-        return p;
+        addr = AllocZeroed(4);
+        StoreBE32(addr, g_title.ldrEntry);
+        break;
     }
     case 0x1C0: // VdGpuClockInMHz
     {
-        const uint32_t p = AllocZeroed(4);
-        StoreBE32(p, 500);
-        return p;
+        addr = AllocZeroed(4);
+        StoreBE32(addr, 500);
+        break;
+    }
+    case 0x156: // XboxHardwareInfo: Flags, NumberOfProcessors(6), ...
+    {
+        addr = AllocZeroed(16);
+        StoreBE32(addr + 0, 0x00000020); // HDD present
+        *GuestPtr<uint8_t>(addr + 4) = 6; // 6 hardware threads
+        break;
     }
     case 0x158: // XboxKrnlVersion: major, minor, build, qfe
     {
-        const uint32_t p = AllocZeroed(8);
-        auto* v = GuestPtr<uint16_t>(p);
+        addr = AllocZeroed(8);
+        auto* v = GuestPtr<uint16_t>(addr);
         v[0] = __builtin_bswap16(2);
         v[1] = __builtin_bswap16(0);
         v[2] = __builtin_bswap16(17559);
         v[3] = 0;
-        return p;
+        break;
     }
     case 0x1BE: // VdGlobalDevice
-        return AllocZeroed(4);
+    case 0x1BF: // VdGlobalXamDevice
+        addr = AllocZeroed(4);
+        break;
     default:
         Log("loader: unknown kernel variable ordinal %03X, giving it zeroed storage", ordinal);
-        return AllocZeroed(0x100);
+        addr = AllocZeroed(0x100);
+        break;
     }
+    s_vars[ordinal] = addr;
+    return addr;
 }
 
 void ResolveVariableImports(const uint8_t* xex, uint32_t textStart, uint32_t textEnd)
@@ -240,8 +280,9 @@ void LoadTitle(const std::filesystem::path& xexPath)
     if (image.base != PPC_IMAGE_BASE)
         Fatal("%s: image base %08zX does not match the recompiled code (%08llX); wrong default.xex?", xexPath.string().c_str(), image.base, PPC_IMAGE_BASE);
 
-    // PE headers, then every section.
-    memcpy(GuestPtr(image.base), image.data.get(), 0x600);
+    // Copy entire decrypted XEX image into guest memory (includes PE headers, sections,
+    // and non-PE resources such as CORETECH, LAYOUT, BOOT, XDBF).
+    memcpy(GuestPtr(uint32_t(image.base)), image.data.get(), image.size);
     uint32_t textStart = 0, textEnd = 0;
     for (const Section& s : image.sections)
     {
@@ -320,7 +361,7 @@ LoadedModule* FindLoadedModule(uint32_t ldrEntry)
 {
     for (auto& mod : g_loadedModules)
     {
-        if (mod.ldrEntry == ldrEntry)
+        if (mod.ldrEntry == ldrEntry || (ldrEntry != 0 && mod.base == ldrEntry))
             return &mod;
     }
     return nullptr;
@@ -404,8 +445,9 @@ uint32_t LoadModuleImage(const std::string& name)
         return 0;
     }
 
-    // PE headers, then every section
-    memcpy(GuestPtr(image.base), image.data.get(), 0x600);
+    // Copy entire decrypted XEX image into guest memory (includes PE headers, sections,
+    // and non-PE resources).
+    memcpy(GuestPtr(uint32_t(image.base)), image.data.get(), image.size);
     uint32_t textStart = 0, textEnd = 0;
     for (const Section& s : image.sections)
     {

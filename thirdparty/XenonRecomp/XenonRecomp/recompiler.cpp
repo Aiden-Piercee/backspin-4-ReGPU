@@ -2492,6 +2492,10 @@ bool Recompiler::Recompile(
             println("\t{}.u32[{}] = {}.u32;", v(insn.operands[0]), insn.operands[4], temp());
             break;
 
+        case 2: //NORMPACKED32 (DEC3N / XMXDEC4)
+            println("\t{0}.u32[{2}] = ({1}.u32[3] & 0x3FF) | (({1}.u32[2] & 0x3FF) << 10) | (({1}.u32[1] & 0x3FF) << 20) | (({1}.u32[0] & 0x3) << 30);", v(insn.operands[0]), v(insn.operands[1]), insn.operands[4]);
+            break;
+
         case 3: // float16_2 into one word (word index = 3 - shift, reversed)
             if (insn.operands[3] != 1)
                 fmt::println("Unexpected float16_2 pack instruction at {:X}", base);

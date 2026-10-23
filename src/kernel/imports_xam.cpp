@@ -98,6 +98,26 @@ GUEST_EXPORT(XamUserGetSigninState)
     Return(ctx, ctx.r3.u32 == 0 ? 1 : 0); // signed in locally
 }
 
+GUEST_EXPORT(XamUserGetSigninInfo)
+{
+    // (user, flags, XUSER_SIGNIN_INFO*)
+    if (ctx.r3.u32 != 0)
+    {
+        Return(ctx, 0x80070000u | X_ERROR_NO_SUCH_USER);
+        return;
+    }
+    if (const uint32_t info = ctx.r5.u32)
+    {
+        memset(GuestPtr(info), 0, 40);
+        StoreBE64(info + 0x00, Xuid());
+        StoreBE32(info + 0x08, 1); // XUSER_INFO_FLAG_LIVE_ENABLED (non-guest)
+        StoreBE32(info + 0x0C, 1); // eXUserSigninState_SignedInLocally
+        const char* name = GetSettings().profile.c_str();
+        strncpy(GuestPtr<char>(info + 0x18), name, 15);
+    }
+    Return(ctx, X_ERROR_SUCCESS);
+}
+
 GUEST_EXPORT(XamUserGetXUID)
 {
     // (user, type, xuid*)
@@ -910,7 +930,13 @@ GUEST_EXPORT(XamEnumerate)
         }
     }
     StoreIfNonNull(ctx.r7.u32, count);
-    FinishUi(ctx, ctx.r8.u32, count ? X_ERROR_SUCCESS : X_ERROR_NO_MORE_FILES);
+    if (ctx.r8.u32)
+    {
+        CompleteOverlapped(ctx.r8.u32, count ? X_ERROR_SUCCESS : X_ERROR_NO_MORE_FILES, 0, count);
+        Return(ctx, X_ERROR_IO_PENDING);
+    }
+    else
+        Return(ctx, count ? X_ERROR_SUCCESS : X_ERROR_NO_MORE_FILES);
 }
 
 // Tasks ----------------------------------------------------------------------------

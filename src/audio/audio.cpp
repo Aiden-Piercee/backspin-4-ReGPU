@@ -29,6 +29,7 @@ constexpr uint32_t kTargetQueued = 4, kMaxQueued = 8;
 
 std::atomic<uint32_t> g_callback{ 0 };
 std::atomic<uint32_t> g_callbackArg{ 0 };
+std::atomic<uint32_t> g_callbackData{ 0 };
 std::shared_ptr<ThreadObject> g_audioThread;
 // TS4_TRACE_AUDIO=1: once a second, the callbacks run, frames submitted and frames dropped.
 std::atomic<uint32_t> g_statCallbacks{ 0 }, g_statSubmitted{ 0 }, g_statDropped{ 0 }, g_statSkipped{ 0 };
@@ -153,15 +154,18 @@ void AudioLoop(PPCContext& ctx)
             continue; // the device is behind: skip a tick
         }
         const uint32_t cb = g_callback;
-        if (!cb)
+        const uint32_t cbData = g_callbackData;
+        if (!cb || !cbData)
             continue;
-        ctx.r3.u64 = g_callbackArg;
+        StoreBE32(cbData, g_callbackArg.load());
+        ctx.r3.u64 = cbData;
         g_statCallbacks++;
         GuestCall(ctx, cb);
         // The device is about to run dry: one extra tick now.
         if (g_output.ok && queued < int(kTargetQueued) / 2)
         {
-            ctx.r3.u64 = g_callbackArg;
+            StoreBE32(cbData, g_callbackArg.load());
+            ctx.r3.u64 = cbData;
             g_statCallbacks++;
             GuestCall(ctx, cb);
         }
@@ -183,8 +187,12 @@ GUEST_EXPORT(XAudioRegisterRenderDriverClient)
 {
     // (callback struct { u32 fn, u32 arg }*, driver*)
     const uint32_t callback = ctx.r3.u32;
+    if (!g_callbackData)
+        g_callbackData = GuestAlloc(Heap::Virtual, 16);
+    const uint32_t arg = LoadBE32(callback + 4);
+    g_callbackArg = arg;
+    StoreBE32(g_callbackData, arg);
     g_callback = LoadBE32(callback);
-    g_callbackArg = LoadBE32(callback + 4);
     StoreIfNonNull(ctx.r4.u32, 0x41550000);
     if (!g_audioThread)
     {

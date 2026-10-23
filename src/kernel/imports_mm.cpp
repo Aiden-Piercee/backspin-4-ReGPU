@@ -157,7 +157,9 @@ GUEST_EXPORT(XexGetModuleSection)
     // (module, name, data*, size*) - XEX resources (header 0x000002FF):
     // { u32 size, then { char name[8], u32 address, u32 size } ... }
     const std::string name = GuestString(ctx.r4.u32);
-    const uint32_t resources = XexHeaderField(g_title.xexHeader, 0x000002FF);
+    LoadedModule* mod = FindLoadedModule(ctx.r3.u32);
+    const uint32_t header = mod ? mod->xexHeader : g_title.xexHeader;
+    const uint32_t resources = XexHeaderField(header, 0x000002FF);
     if (resources)
     {
         const uint32_t count = (LoadBE32(resources) - 4) / 16;
@@ -166,14 +168,41 @@ GUEST_EXPORT(XexGetModuleSection)
             const uint32_t entry = resources + 4 + i * 16;
             if (strncmp(GuestPtr<char>(entry), name.c_str(), 8) == 0)
             {
-                StoreIfNonNull(ctx.r5.u32, LoadBE32(entry + 8));
-                StoreIfNonNull(ctx.r6.u32, LoadBE32(entry + 12));
+                const uint32_t dataAddr = LoadBE32(entry + 8);
+                const uint32_t dataSize = LoadBE32(entry + 12);
+                StoreIfNonNull(ctx.r5.u32, dataAddr);
+                StoreIfNonNull(ctx.r6.u32, dataSize);
+                Log("XexGetModuleSection(mod=%08X, \"%s\"): found at %08X, size %08X",
+                    ctx.r3.u32, name.c_str(), dataAddr, dataSize);
                 Return(ctx, X_STATUS_SUCCESS);
                 return;
             }
         }
     }
-    Log("XexGetModuleSection(\"%s\"): not found", name.c_str());
+    if (header != g_title.xexHeader && g_title.xexHeader)
+    {
+        const uint32_t fallbackResources = XexHeaderField(g_title.xexHeader, 0x000002FF);
+        if (fallbackResources)
+        {
+            const uint32_t count = (LoadBE32(fallbackResources) - 4) / 16;
+            for (uint32_t i = 0; i < count; i++)
+            {
+                const uint32_t entry = fallbackResources + 4 + i * 16;
+                if (strncmp(GuestPtr<char>(entry), name.c_str(), 8) == 0)
+                {
+                    const uint32_t dataAddr = LoadBE32(entry + 8);
+                    const uint32_t dataSize = LoadBE32(entry + 12);
+                    StoreIfNonNull(ctx.r5.u32, dataAddr);
+                    StoreIfNonNull(ctx.r6.u32, dataSize);
+                    Log("XexGetModuleSection(fallback mod=%08X, \"%s\"): found at %08X, size %08X",
+                        ctx.r3.u32, name.c_str(), dataAddr, dataSize);
+                    Return(ctx, X_STATUS_SUCCESS);
+                    return;
+                }
+            }
+        }
+    }
+    Log("XexGetModuleSection(\"%s\"): not found (mod=%08X)", name.c_str(), ctx.r3.u32);
     Return(ctx, X_STATUS_NOT_SUPPORTED);
 }
 

@@ -11,6 +11,7 @@
 #include "kernel/runtime.h"
 #include "live_switch.h"
 #include "loader.h"
+#include "kernel/thread.h"
 #include "kernel/vfs.h"
 
 namespace fs = std::filesystem;
@@ -365,8 +366,14 @@ GUEST_EXPORT(NtReadFile)
         Return(ctx, X_STATUS_INVALID_HANDLE);
         return;
     }
-    if (ctx.r5.u32)
-        LOG_ONCE("NtReadFile with an APC routine is not supported");
+    const uint32_t apcRoutine = ctx.r5.u32;
+    const uint32_t apcContext = ctx.r6.u32;
+    if (apcRoutine)
+    {
+        Log("io: NtReadFile with APC: lr=%08llX handle=%08X event=%08X apc=%08X apcCtx=%08X iosb=%08X buf=%08X len=%u offPtr=%08X file=%s",
+            ctx.lr, ctx.r3.u32, ctx.r4.u32, apcRoutine, apcContext, iosb, buffer, length, offsetPtr,
+            file ? file->path.string().c_str() : "null");
+    }
 
     uint64_t offset = file->position;
     if (offsetPtr)
@@ -421,6 +428,16 @@ GUEST_EXPORT(NtReadFile)
         status = X_STATUS_END_OF_FILE;
     SetIoStatus(iosb, status, read);
     SignalEventHandle(ctx.r4.u32);
+    if (apcRoutine)
+    {
+        PPCContext apcCtx = ctx;
+        apcCtx.r1.u32 -= 0x100;
+        StoreBE32(apcCtx.r1.u32, ctx.r1.u32);
+        apcCtx.r3.u64 = apcContext;
+        apcCtx.r4.u64 = iosb;
+        apcCtx.r5.u64 = 0;
+        GuestCall(apcCtx, apcRoutine);
+    }
     // Overlapped handles report the (already finished) read as pending, as
     // on the console: XAPI then returns ERROR_IO_PENDING and the title's
     // streaming code relies on that to advance.

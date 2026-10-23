@@ -612,3 +612,83 @@ GUEST_EXPORT(vswprintf)
     out[s.size()] = 0;
     Return(ctx, s.size());
 }
+
+static std::string NarrowWideFormat(uint32_t wideFmtAddr)
+{
+    std::string fmt;
+    bool inSpec = false, sized = false;
+    for (uint32_t i = 0; uint16_t c = __builtin_bswap16(GuestPtr<uint16_t>(wideFmtAddr)[i]); i++)
+    {
+        if (inSpec && !sized && c == 's')
+            fmt += 'l';
+        else if (inSpec && !sized && c == 'S')
+        {
+            fmt += "hs";
+            inSpec = false;
+            continue;
+        }
+        if (inSpec && (c == 'l' || c == 'h' || c == 'w'))
+            sized = true;
+        if (c == '%')
+        {
+            inSpec = !inSpec;
+            sized = false;
+        }
+        else if (inSpec && isalpha(c) && c != 'l' && c != 'h' && c != 'w' && c != 'I')
+            inSpec = false;
+        fmt += char(c);
+    }
+    return fmt;
+}
+
+GUEST_EXPORT(_snprintf)
+{
+    const uint32_t count = ctx.r4.u32;
+    const std::string s = FormatGuestStack(ctx, ctx.r5.u32, 3);
+    const uint32_t n = uint32_t(std::min<size_t>(s.size(), count));
+    memcpy(GuestPtr(ctx.r3.u32), s.data(), n);
+    if (n < count)
+        *GuestPtr<char>(ctx.r3.u32 + n) = 0;
+    Return(ctx, s.size() > count ? uint64_t(-1) : s.size());
+}
+
+GUEST_EXPORT(_vscwprintf)
+{
+    const std::string fmt = NarrowWideFormat(ctx.r3.u32);
+    const uint32_t tmp = GuestAlloc(Heap::Virtual, uint32_t(fmt.size() + 1));
+    memcpy(GuestPtr(tmp), fmt.c_str(), fmt.size() + 1);
+    const std::string s = FormatGuestVaList(tmp, ctx.r4.u32);
+    GuestFree(tmp);
+    Return(ctx, s.size());
+}
+
+GUEST_EXPORT(swprintf)
+{
+    const std::string fmt = NarrowWideFormat(ctx.r4.u32);
+    const uint32_t tmp = GuestAlloc(Heap::Virtual, uint32_t(fmt.size() + 1));
+    memcpy(GuestPtr(tmp), fmt.c_str(), fmt.size() + 1);
+    std::string s = FormatGuestStack(ctx, tmp, 2);
+    GuestFree(tmp);
+    auto* out = GuestPtr<uint16_t>(ctx.r3.u32);
+    for (size_t i = 0; i < s.size(); i++)
+        out[i] = __builtin_bswap16(uint8_t(s[i]));
+    out[s.size()] = 0;
+    Return(ctx, s.size());
+}
+
+GUEST_EXPORT(_snwprintf)
+{
+    const uint32_t count = ctx.r4.u32;
+    const std::string fmt = NarrowWideFormat(ctx.r5.u32);
+    const uint32_t tmp = GuestAlloc(Heap::Virtual, uint32_t(fmt.size() + 1));
+    memcpy(GuestPtr(tmp), fmt.c_str(), fmt.size() + 1);
+    std::string s = FormatGuestStack(ctx, tmp, 3);
+    GuestFree(tmp);
+    const uint32_t n = uint32_t(std::min<size_t>(s.size(), count));
+    auto* out = GuestPtr<uint16_t>(ctx.r3.u32);
+    for (size_t i = 0; i < n; i++)
+        out[i] = __builtin_bswap16(uint8_t(s[i]));
+    if (n < count)
+        out[n] = 0;
+    Return(ctx, s.size() > count ? uint64_t(-1) : s.size());
+}
