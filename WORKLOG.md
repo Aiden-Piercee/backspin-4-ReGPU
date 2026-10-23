@@ -136,3 +136,57 @@ Notes from the first bring-up attempt (before the XenonRecomp + ReGPU port) were
     }
     ```
   - Built cleanly; verification run in progress (`task-2686`).
+
+
+### START to the main menu [2026-10-23]
+
+The native port now goes title -> START -> loading -> Academy court -> attract match -> **main menu**
+(`out/main_menu.png`: GAME MODES / Xbox LIVE / PLAYER ZONE / UNLOCK OVERVIEW / OPTIONS / STEREOSCOPIC 3D),
+and on into player select and a match. Six blockers, in the order they showed up, each fixed in the
+runtime, ReGPU or the recompiler (the generated `out/ppc*` sources are regenerated, not edited):
+
+1. **Frozen frame after START (ReGPU, `35ca489`).** `VdInitializeRingBuffer` reset `rptr` while the CP
+   thread was still in its loop over Loader_DLL's ring, which then stored the old position (0xD58) into
+   the new ring. The CP stepped past `wptr` through stale dwords forever; the loading screen's fence wait
+   (`swg_sub_88292698`) never returned. Ring swap is now under a mutex with a generation the CP checks,
+   and `CP_RB_RPTR`/`CP_RB_WPTR` go back to 0.
+2. **Crash in `swg_sub_8819F760` on ModuleManager_3 (XenonRecomp, `8d1cabe`).** Jump tables switched on
+   `rN.u64`; `rlwinm` with a wrapping mask leaves the upper word set, so the switch hit
+   `__builtin_unreachable`. Tables now switch on `.u32`. The same commit generates `vcmpbfp128` (it had been
+   hand-patched into `out/`, lost on regenerate). Regenerating also brings in `vminub`/`vmaxub`, missing
+   from the old sources. Build the tool from `thirdparty/XenonRecomp` and point `TS4_TOOLS` at it:
+   `cmake -G Ninja -S thirdparty/XenonRecomp -B <dir> -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl`,
+   then a `<tools>\xenonrecomp` junction to `<dir>`; `TS4_XENONRECOMP=thirdparty\XenonRecomp`.
+3. **`indirect call to 88537514` (`0746832`).** XenonAnalyse missed Swing_DLL's jump table at 0x885370B4
+   (a loop label between the bounds check and the table read). `tools/find_jump_tables.py` finds such
+   tables and `recomp-ts4.ps1 -Prepare` appends them; it found only this one in all three images.
+   `recomp-ts4.ps1` now also runs `patch_mftb.py` itself.
+4. **Job threads never woke (`12b71d4`).** Swing_DLL's six job threads (0x889D1300) wait on semaphores
+   through `ObReferenceObjectByHandle` and then `OBJECT_HEADER.Type->DefaultObject` (body-8, then +0x14).
+   Runtime objects had no header, so they waited on body + garbage and the main thread spun in
+   `swg_sub_889D0270`. Objects now get a 16-byte header pointing at the real `Ex*ObjectType`; the loader's
+   types have the OBJECT_TYPE layout, and ordinal 0x17 is the semaphore type (it was labelled mutant).
+5. **Sound engine spinning with its lock held (`276b9cd`).** No XMA decoder: `XMACreateContext` was a stub
+   and nothing consumed input or produced output, so `swg_sub_88352600` spun. `src/audio/xma.cpp` gives the
+   context array, the APU registers the title's XMA library code uses (ContextArrayAddress 0x7FEA1800;
+   Kick/Lock/Clear at 0x1940/0x1A40/0x1A80, written with stwbrx) and a decoder thread that consumes packets
+   at their real frame counts and writes silence. **Real XMA decoding is still to do: the game is silent.**
+6. **Attract match froze on its first frames (`37058c2`).** D3D's XPS code has the GPU write a read pointer
+   by GPU address (0xC0000180, EVENT_WRITE_SHD) and polls it at CPU 0x7F000180. On the console, 0x7F000000
+   is a window onto physical memory, as on the console; here it was separate memory. The runtime
+   now maps physical 0-12 MB at 0x7F000000, and the physical heap starts at 16 MB.
+
+Debugging aids added: `regpuctl threads` logs each guest thread's registers and, for a blocked thread, the
+return addresses along its guest back chain (`b430701`); `regpuctl capture` traces the next whole frame,
+not the one in progress (its trace used to start mid-frame, without the first tile).
+
+**Still open:**
+- **Predicated tiling, lower tile.** In-match and on the Academy court, 3D scenes render in two EDRAM tiles
+  (rows 0-383, then 384-719 with window offset -384, 2x MSAA, colour base 0, depth base 0x300). The lower
+  tile shows stale or garbage pixels (`out/attract_match_tiling.png`). Tile 1's resolve goes to
+  `dest = image + 384 rows` (0x15FD6000 for the image at 0x15DF6000), which ReGPU already maps back to the
+  image base. A 1x full-screen copy (draw ps 5f34b1b240b34e1c, sampling 0x15DF6000) is then resolved over
+  the same image. Next step: a clean `regpuctl capture` in a match (now whole-frame) and check tile 1's
+  first draws (clears, depth reset) and that copy. Full-screen UI screens (menus, loading) render correctly.
+- NtReadFile still calls completion APCs inline, which nests one guest frame per chained read (no APC queue).
+- Untranslated shader ops: `scalar op 51`, `scalar op 63`, `instruction out of range` (ReGPU logs which).
