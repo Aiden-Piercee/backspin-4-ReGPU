@@ -9,6 +9,11 @@ if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "topspin4 needs clang-cl (the recompiled code uses clang builtins)")
 endif()
 
+# Release is optimised even when the cache's CMAKE_*_FLAGS_RELEASE are empty (this build's were:
+# everything, the recompiled code included, was compiled at /Od, and loading the XEX modules
+# alone took 15 s).
+add_compile_options("$<$<CONFIG:Release,RelWithDebInfo>:/O2>")
+
 add_subdirectory(thirdparty/XenonRecomp EXCLUDE_FROM_ALL)
 
 # Recompiled PowerPC modules
