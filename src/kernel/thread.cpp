@@ -240,8 +240,28 @@ void LogGuestThreads()
         if (t.ctx)
         {
             Log("  thread %u %-16s %s", t.id, t.name.c_str(), HostStack(t.hostHandle, 10).c_str());
+            // Racy for a running thread, but registers a loop keeps fixed read true.
+            Log("      r1 %08X r3 %08X r4 %08X r5 %08X r28 %08X r29 %08X r30 %08X r31 %08X lr %08X", t.ctx->r1.u32, t.ctx->r3.u32,
+                t.ctx->r4.u32, t.ctx->r5.u32, t.ctx->r28.u32, t.ctx->r29.u32, t.ctx->r30.u32, t.ctx->r31.u32, uint32_t(t.ctx->lr));
             if (!t.waitingOn.empty())
+            {
                 Log("      waits on %s", t.waitingOn.c_str());
+                // Blocked in an import, so its guest r1 is current: follow the back chain (the
+                // caller's return address is saved at frame - 8 by the usual prologue).
+                std::string chain;
+                uint32_t frame = t.ctx->r1.u32;
+                for (int i = 0; i < 24 && frame && (frame & 3) == 0; i++)
+                {
+                    const uint32_t next = LoadBE32(frame);
+                    if (next <= frame || next - frame > 0x100000)
+                        break;
+                    char text[16];
+                    snprintf(text, sizeof(text), " %08X", LoadBE32(next - 8));
+                    chain += text;
+                    frame = next;
+                }
+                Log("      guest return addresses:%s", chain.c_str());
+            }
         }
         else
             Log("  thread %u %-16s not started (suspend %d)", t.id, t.name.c_str(), t.suspendCount);
