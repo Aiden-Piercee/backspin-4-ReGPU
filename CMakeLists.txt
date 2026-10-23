@@ -16,10 +16,14 @@ add_compile_options("$<$<CONFIG:Release,RelWithDebInfo>:/O2>")
 
 add_subdirectory(thirdparty/XenonRecomp EXCLUDE_FROM_ALL)
 
-# Recompiled PowerPC modules
-set(TS4_PPC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/ppc")
-set(TS4_LOADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/ppc_loader")
-set(TS4_SWING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/ppc_swing")
+# Recompiled PowerPC modules. TS4_OUT_DIR: another checkout's out folder (its recompiled
+# sources); TS4_PREBUILT_PPC: another build folder whose ts4_*ppc.lib are linked as they are, so
+# a side build (a test variant of the host code) compiles only the host code.
+set(TS4_OUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out" CACHE PATH "Folder holding ppc, ppc_loader and ppc_swing")
+set(TS4_PREBUILT_PPC "" CACHE PATH "Build folder whose recompiled-module libraries are linked instead of compiled")
+set(TS4_PPC_DIR "${TS4_OUT_DIR}/ppc")
+set(TS4_LOADER_DIR "${TS4_OUT_DIR}/ppc_loader")
+set(TS4_SWING_DIR "${TS4_OUT_DIR}/ppc_swing")
 
 file(GLOB TS4_PPC_SOURCES CONFIGURE_DEPENDS "${TS4_PPC_DIR}/*.cpp")
 file(GLOB TS4_LOADER_SOURCES CONFIGURE_DEPENDS "${TS4_LOADER_DIR}/*.cpp")
@@ -32,17 +36,24 @@ endif()
 set(PPC_FORCE_INCLUDE "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/ppc_hooks.h")
 set(PPC_COMPILE_FLAGS -Wno-everything -msse4.1 -fno-strict-aliasing ${PPC_FORCE_INCLUDE})
 
-add_library(ts4_ppc STATIC ${TS4_PPC_SOURCES})
-target_include_directories(ts4_ppc PRIVATE "${TS4_PPC_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
-target_compile_options(ts4_ppc PRIVATE ${PPC_COMPILE_FLAGS})
+if(TS4_PREBUILT_PPC)
+    foreach(lib ts4_ppc ts4_loader_ppc ts4_swing_ppc)
+        add_library(${lib} STATIC IMPORTED)
+        set_target_properties(${lib} PROPERTIES IMPORTED_LOCATION "${TS4_PREBUILT_PPC}/${lib}.lib")
+    endforeach()
+else()
+    add_library(ts4_ppc STATIC ${TS4_PPC_SOURCES})
+    target_include_directories(ts4_ppc PRIVATE "${TS4_PPC_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
+    target_compile_options(ts4_ppc PRIVATE ${PPC_COMPILE_FLAGS})
 
-add_library(ts4_loader_ppc STATIC ${TS4_LOADER_SOURCES})
-target_include_directories(ts4_loader_ppc PRIVATE "${TS4_LOADER_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
-target_compile_options(ts4_loader_ppc PRIVATE ${PPC_COMPILE_FLAGS})
+    add_library(ts4_loader_ppc STATIC ${TS4_LOADER_SOURCES})
+    target_include_directories(ts4_loader_ppc PRIVATE "${TS4_LOADER_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
+    target_compile_options(ts4_loader_ppc PRIVATE ${PPC_COMPILE_FLAGS})
 
-add_library(ts4_swing_ppc STATIC ${TS4_SWING_SOURCES})
-target_include_directories(ts4_swing_ppc PRIVATE "${TS4_SWING_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
-target_compile_options(ts4_swing_ppc PRIVATE ${PPC_COMPILE_FLAGS})
+    add_library(ts4_swing_ppc STATIC ${TS4_SWING_SOURCES})
+    target_include_directories(ts4_swing_ppc PRIVATE "${TS4_SWING_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
+    target_compile_options(ts4_swing_ppc PRIVATE ${PPC_COMPILE_FLAGS})
+endif()
 
 # Built-in compute shaders (DepthCopy, Gamma, Enhance)
 set(TS4_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")

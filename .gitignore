@@ -36,3 +36,5 @@ pipelines.manifest
 # Screenshots and dumps left at the root
 /*.png
 /*.raw
+/tools/audiotest/profile/
+/tools/audiotest/logs/
