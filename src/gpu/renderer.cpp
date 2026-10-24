@@ -215,8 +215,22 @@ float PassScale()
     thread_local Memo memo;
     const uint32_t surface = gpureg::Get(0x2000), color = gpureg::Get(0x2001) & 0xFFF, generation = g_nativeMsaaGeneration.load(std::memory_order_relaxed);
     if (surface != memo.surface || color != memo.color || generation != memo.generation || g_tallInfo != memo.tallInfo || g_tallHeight != memo.tallHeight)
-        memo = { surface, color, generation, g_tallInfo, g_tallHeight,
-            std::min(float(kWidth) / float(PassWidth()), float(kHeight) / float(PassHeight())) };
+    {
+        float scale = std::min(float(kWidth) / float(PassWidth()), float(kHeight) / float(PassHeight()));
+        // REGPU_TALL_NATIVE=1: a tall pass (a 1024x1024 shadow map) at its own resolution, one host
+        // pixel per guest pixel, instead of scaled with the output (an experiment).
+        static LiveSwitch tallNative("REGPU_TALL_NATIVE");
+        if (tallNative && PassHeight() > kHeight && float(OutputHeight()) * g_sceneScale >= float(PassHeight()))
+            scale = float(kHeight) / (float(OutputHeight()) * g_sceneScale);
+        // REGPU_NATIVE_SMALL=1: small render targets (512 pixels wide or less: texture-space maps, lookup
+        // tables) at their own resolution too. A shader that filters such a map by hand works out texel
+        // positions from its guest size (Top Spin 4's faces: frac(uv * 128) over a 128x128 map drawn at
+        // 192x192 gave a fine regular mesh).
+        static LiveSwitch nativeSmall("REGPU_NATIVE_SMALL");
+        if (nativeSmall && (surface & 0x3FFF) <= 512 && PassHeight() <= kHeight)
+            scale = float(kHeight) / (float(OutputHeight()) * g_sceneScale);
+        memo = { surface, color, generation, g_tallInfo, g_tallHeight, scale };
+    }
     return memo.result;
 }
 float ScaleY() { return float(OutputHeight()) / float(kHeight) * g_sceneScale * PassScale(); }
@@ -6149,6 +6163,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         uint32_t vte[4];
         uint32_t vfl[32][4]; // vertex fetch layout of the bound shader
         float vuser[4][4];   // the game's per-draw constants (Host::onDraw; hlsl.cpp vuser), zero by default
+        float vbias[4];      // x: depth bias (polygon offset)
         float vwide[4];      // x: Hor+ factor (see hlsl.cpp)
         float vjitter[4];     // motion-vector variants: this frame's jitter (NDC)
     };
@@ -6332,6 +6347,19 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
             vc->vscale[3] = float(MsaaAcross(msaa)) / float(MsaaAcross(uint32_t(native)));
             vc->voffset[3] = float(MsaaDown(msaa)) / float(MsaaDown(uint32_t(native)));
         }
+        // An MSAA view of a surface drawn at 1x (its layout is 1x): each of the view's pixels is 2x1 or
+        // 2x2 pixels of it, so its rectangles scale up the same way. Top Spin 4 clears its 128x128 face
+        // lighting maps through a 4x view; unscaled, three quarters of the map kept stale texels, and
+        // the faces' texel-border filtering drew them as a fine mesh. REGPU_NO_MSAA_VIEW_ON_1X=1: unscaled.
+        else if (static LiveSwitch noView1x("REGPU_NO_MSAA_VIEW_ON_1X"); !noView1x && msaa != 0)
+        {
+            const uint32_t key = LayoutKey(surface), native = NativeSlot(key).load(std::memory_order_relaxed);
+            if (native >> 2 == key && (native & 3) == 0)
+            {
+                vc->vscale[3] = float(MsaaAcross(msaa));
+                vc->voffset[3] = float(MsaaDown(msaa));
+            }
+        }
     }
     vc->voffset[0] = RegFloat(PA_CL_VPORT_XOFFSET);
     vc->voffset[1] = RegFloat(PA_CL_VPORT_YOFFSET);
@@ -6471,6 +6499,19 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         // Debug: REGPU_NO_LIVE_CUBE=1 binds the fallback for cubes the title rendered (live reflections).
         if (static LiveSwitch noLiveCube("REGPU_NO_LIVE_CUBE"); noLiveCube && cube && ResolvedFor(fetch))
             texture = nullptr;
+        // Debug: REGPU_WHITE_TEXTURE=<hex physical address>[,<address>...] binds the white fallback for those textures.
+        static const std::vector<uint32_t> whiteAddresses = [] {
+            std::vector<uint32_t> v;
+            for (const char* s = getenv("REGPU_WHITE_TEXTURE"); s && *s;)
+            {
+                char* end = nullptr;
+                v.push_back(uint32_t(strtoul(s, &end, 16)) & 0xFFFFF000);
+                s = *end == ',' ? end + 1 : end + strlen(end);
+            }
+            return v;
+        }();
+        if (!cube && std::find(whiteAddresses.begin(), whiteAddresses.end(), fetch.Address()) != whiteAddresses.end())
+            texture = nullptr;
         const uint32_t index = texture ? BindlessIndex(texture, format, cube) : (cube ? 1u : 0u);
         if (RendererTracing())
             CaptureTexture(fetch, slot, cube, texture != nullptr, index, native, g_textureFailure);
@@ -6500,6 +6541,20 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         pc->tinfo[slot][0] = (point ? (clamp ? 2 : 3) : (clamp ? 1 : 0)) | ((uint32_t(fetch.ExpAdjust()) & 0x3F) << 8);
         if (!clamp && !oldClamp)
             pc->tinfo[slot][0] |= (clampX ? 1u << 18 : 0u) | (clampY ? 1u << 19 : 0u);
+        // Point sampling: REGPU_POINT_NUDGE=1 / REGPU_POINT_NUDGE_NEG=1 move the coordinate a hundredth
+        // of a texel forwards / back (an experiment for a regular mesh on faces; hlsl.cpp TFetchRaw).
+        if (point)
+        {
+            static LiveSwitch nudge("REGPU_POINT_NUDGE"), nudgeBack("REGPU_POINT_NUDGE_NEG");
+            pc->tinfo[slot][0] |= (nudge ? 1u << 4 : 0u) | (nudgeBack ? 1u << 5 : 0u);
+        }
+        // Normal maps (DXN 49, CTX1 60): REGPU_FLAT_NORMALS=1 reads them flat, REGPU_DXN_SWAP=1
+        // exchanges x and y (experiments for a grid on faces; hlsl.cpp TFetch).
+        if (fetch.Format() == 49 || fetch.Format() == 60)
+        {
+            static LiveSwitch flatNormals("REGPU_FLAT_NORMALS"), swapXY("REGPU_DXN_SWAP");
+            pc->tinfo[slot][0] |= (flatNormals ? 1u << 2 : 0u) | (swapXY ? 1u << 3 : 0u);
+        }
         // Clamp to border on both axes (modes 6, 7): the shader returns the border colour
         // outside the image (dword 5 bits 0-1: 1 white, else black).
         if (clampX >= 6 && clampY >= 6)
@@ -6512,6 +6567,8 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
             static LiveSwitch lit("REGPU_DIAG_SHADOW_LIT"), dark("REGPU_DIAG_SHADOW_DARK"), border("REGPU_FIX_SHADOW_BORDER"),
                 as20e4("REGPU_FIX_SHADOW_AS_20E4"), from20e4("REGPU_FIX_SHADOW_FROM_20E4"), litX("REGPU_DIAG_SHADOW_LIT_X");
             pc->tinfo[slot][0] |= 1u << 24;
+            if (static LiveSwitch point("REGPU_SHADOW_POINT"); point) // point sampling, clamped (no filtering across texels)
+                pc->tinfo[slot][0] = (pc->tinfo[slot][0] & ~3u) | 2u;
             if (lit) // every lookup reads the far plane (nothing in front: lit, if the receiver compares as usual)
                 pc->tinfo[slot][0] |= 1u << 20;
             if (dark) // every lookup reads the near plane (everything in front: shadowed)
@@ -6564,6 +6621,49 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     // In depth-only passes such kills are skipped (bit 2). REGPU_NO_KILL_SKIP=1: kept.
     if (static LiveSwitch noKillSkip("REGPU_NO_KILL_SKIP"); !noKillSkip && edramMode == 5 && !vs.info.interpolatorsWritten)
         pc->info[2] |= 4u;
+    // Experiments for speckled lighting on players (hlsl.cpp): REGPU_PS_SANITIZE=1 outputs 0 for
+    // NaN/Inf (bit 3), REGPU_SAFE_SQRT=1 keeps sqrt/rsqrt inputs positive (bit 4).
+    {
+        static LiveSwitch sanitize("REGPU_PS_SANITIZE"), safeSqrt("REGPU_SAFE_SQRT");
+        pc->info[2] |= (sanitize ? 8u : 0u) | (safeSqrt ? 16u : 0u);
+    }
+    // Polygon offset (PA_SU_SC_MODE_CNTL bits 11-13, PA_SU_POLY_OFFSET_FRONT/BACK_SCALE/OFFSET
+    // 0x2380-0x2383): not translated so far. REGPU_POLY_OFFSET=1 applies the constant offset, in
+    // units of 2^-24 of the depth range, after the viewport transform (an experiment: speckled
+    // self-shadowing on players). Each new value is logged.
+    vc->vbias[0] = vc->vbias[1] = vc->vbias[2] = vc->vbias[3] = 0;
+    if (const uint32_t mode = gpureg::Get(PA_SU_SC_MODE_CNTL); mode & (7u << 11))
+    {
+        const float scale = RegFloat(0x2380), offset = RegFloat(0x2381);
+        static std::mutex m;
+        static std::set<std::pair<uint32_t, uint32_t>> seen;
+        {
+            std::lock_guard lock(m);
+            if (seen.size() < 64 && seen.emplace(gpureg::Get(0x2380), gpureg::Get(0x2381)).second)
+                Log("renderer: polygon offset (mode %X) front scale %g offset %g, back scale %g offset %g, edram mode %u", (mode >> 11) & 7,
+                    scale, offset, RegFloat(0x2382), RegFloat(0x2383), edramMode);
+        }
+        if (static LiveSwitch polyOffset("REGPU_POLY_OFFSET"); polyOffset)
+            vc->vbias[0] = offset / 16777216.0f;
+    }
+    // Colour draws whose vertex shader allocates interpolators (SQ_PROGRAM_CNTL bits 20-23: count - 1)
+    // it never writes: logged once per shader pair. REGPU_UNWRITTEN_FILL=1 starts unwritten
+    // interpolators at 0.5 instead of 0 (vte.x bit 29, hlsl.cpp; an experiment).
+    if (edramMode == 4)
+    {
+        const uint32_t allocated = (2u << ((gpureg::Get(SQ_PROGRAM_CNTL) >> 20) & 0xF)) - 1, unwritten = allocated & ~vs.info.interpolatorsWritten;
+        if (unwritten)
+        {
+            static std::mutex m;
+            static std::set<std::pair<uint64_t, uint64_t>> seen;
+            std::lock_guard lock(m);
+            if (seen.emplace(C().vsHash, C().psHash).second)
+                Log("renderer: vs %016llx writes interpolators %04X of %04X allocated (ps %016llx reads the rest unwritten)",
+                    (unsigned long long)C().vsHash, vs.info.interpolatorsWritten, allocated, (unsigned long long)C().psHash);
+        }
+        if (static LiveSwitch fill("REGPU_UNWRITTEN_FILL"); fill && unwritten)
+            vc->vte[0] |= 1u << 29;
+    }
     // HUD and menus sample ordinary textures; full-screen layers sample resolved targets
     // and must keep spanning the width (squeezing them warped the image outside 16:9).
     vc->vwide[3] = g_drawSamplesResolve ? 0.0f : 1.0f;
@@ -7243,6 +7343,9 @@ void PrecompileAll()
     Log("static shaders: %zu compiled in %.1f s (%zu found in memory meanwhile)", compiling.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - compileStart).count(), compiling.size() - size_t(toCompile));
 }
 
+void GpuSetFreeze(bool on); // gpu.cpp: F9
+bool GpuFreezeWanted();
+
 void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
 {
     if (regpu::GetHost().onSwap)
@@ -7254,7 +7357,6 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
     BeginFrameIfNeeded();
     // A frame that rendered small but never resolved a scene (a menu): upscale what it shows
     // and stay at full size for a while (menus are drawn sharp at full size).
-    if (g_scenePhase && !g_upscale.switchedThisFrame)
     {
         UpscaleResolved(frontBuffer);
         g_sceneScale = 1.0f;
@@ -7316,6 +7418,12 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
             Log("capture: F12 pressed, tracing frame %llu", (unsigned long long)dumpFrame);
         }
         wasDown = down;
+        // F9: freeze the picture (gpu.cpp GpuSetFreeze) for live shader edits; F9 again resumes.
+        static bool f9WasDown = false;
+        const bool f9Down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        if (f9Down && !f9WasDown && pid == GetCurrentProcessId())
+            GpuSetFreeze(!GpuFreezeWanted());
+        f9WasDown = f9Down;
     }
     // REGPU_CAPTURE_TALL=1: the same capture as F12, once a pass taller than the screen was drawn.
     {
@@ -7483,6 +7591,8 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
                     for (UINT x = 0; x < d.width; x++)
                         if (const float f = reinterpret_cast<const float*>(mapped + size_t(y) * d.pitch)[x]; f > 0.0f && f < 1.0f)
                             lo = std::min(lo, f), hi = std::max(hi, f);
+            // REGPU_DUMP_ALPHA=1: colour dumps keep their alpha (opaque otherwise, to view).
+            static LiveSwitch keepAlpha("REGPU_DUMP_ALPHA");
             for (UINT y = 0; y < d.height; y++)
                 for (UINT x = 0; x < d.width; x++)
                 {
@@ -7514,7 +7624,8 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
                     }
                     else
                         memcpy(o, mapped + size_t(y) * d.pitch + x * 4, 4);
-                    o[3] = 255;
+                    if (!keepAlpha || d.format == DXGI_FORMAT_R32_FLOAT)
+                        o[3] = 255;
                 }
             d.buffer->Unmap(0, nullptr);
             if (d.format == DXGI_FORMAT_R32_FLOAT)
