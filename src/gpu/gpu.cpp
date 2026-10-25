@@ -1435,12 +1435,14 @@ void VblankLoop()
     auto next = Clock::now();
     for (;;)
     {
-        // The title presents on vblanks: every one in gameplay, often every second one in menus. It
-        // keeps game time by the clock, not by frames, so vblanks run at twice the frame cap
-        // (120-720 Hz) and the limiter in VdSwap sets the frame rate for both.
+        // The title presents on vblanks: every one in gameplay, often every second one in menus.
+        // Vblanks run at the console's 60 Hz: a title can step animation per vblank rather than per
+        // frame, and a faster vblank speeds that up (at 120 Hz such animation ran at double speed).
+        // The limiter in VdSwap still sets the frame rate. REGPU_VBLANK_HZ=120: the old rate.
         static const int64_t periodUs = [] {
             const char* v = getenv("REGPU_VBLANK_HZ");
-            const int hz = v ? std::clamp(atoi(v), 30, 1000) : std::clamp(int(FrameCap()) * 2, 120, 720);
+            const int hz = v && *v ? std::clamp(atoi(v), 30, 1000) : 60;
+            Log("gpu: vblank %d Hz", hz);
             return int64_t(1000000 / hz);
         }();
         next += std::chrono::microseconds(periodUs);
