@@ -454,7 +454,9 @@ GUEST_EXPORT(NtReadFile)
     {
         std::string guest = Lower(file->guestPath);
         std::replace(guest.begin(), guest.end(), '\\', '/');
-        if (guest.find("/audio/music/") != std::string::npos && guest.compare(guest.size() - 4, 4, ".xma") == 0)
+        // (Top Spin 4 streams its music from FMOD's Media/Sounds/Music.fsb.)
+        if ((guest.find("/audio/music/") != std::string::npos && guest.compare(guest.size() - 4, 4, ".xma") == 0) ||
+            guest.find("/music.fsb") != std::string::npos)
             AudioNoteMusicRead(file->path, offset, GuestPtr<uint8_t>(buffer), read);
     }
 

@@ -41,6 +41,33 @@ if(TS4_PREBUILT_PPC)
         add_library(${lib} STATIC IMPORTED)
         set_target_properties(${lib} PROPERTIES IMPORTED_LOCATION "${TS4_PREBUILT_PPC}/${lib}.lib")
     endforeach()
+    # The recompiled files with memory-mapped stores (PPC_MM_STORE_*, the XMA registers) are
+    # compiled here, so ppc_hooks.h's MMIO hook applies; as objects they take precedence over
+    # the same members of the prebuilt libraries.
+    set(TS4_MMIO_OBJECTS "")
+    foreach(name loader swing ppc)
+        if(name STREQUAL "loader")
+            set(dir "${TS4_LOADER_DIR}")
+        elseif(name STREQUAL "swing")
+            set(dir "${TS4_SWING_DIR}")
+        else()
+            set(dir "${TS4_PPC_DIR}")
+        endif()
+        file(GLOB candidates "${dir}/ppc_recomp.*.cpp")
+        set(mmio "")
+        foreach(f ${candidates})
+            file(STRINGS "${f}" hit REGEX "PPC_MM_STORE" LIMIT_COUNT 1)
+            if(hit)
+                list(APPEND mmio "${f}")
+            endif()
+        endforeach()
+        if(mmio)
+            add_library(ts4_mmio_${name} OBJECT ${mmio})
+            target_include_directories(ts4_mmio_${name} PRIVATE "${dir}" thirdparty/XenonRecomp/thirdparty/simde)
+            target_compile_options(ts4_mmio_${name} PRIVATE ${PPC_COMPILE_FLAGS})
+            list(APPEND TS4_MMIO_OBJECTS $<TARGET_OBJECTS:ts4_mmio_${name}>)
+        endif()
+    endforeach()
 else()
     add_library(ts4_ppc STATIC ${TS4_PPC_SOURCES})
     target_include_directories(ts4_ppc PRIVATE "${TS4_PPC_DIR}" thirdparty/XenonRecomp/thirdparty/simde)
@@ -68,7 +95,7 @@ file(GLOB_RECURSE TOPSPIN4_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 list(REMOVE_ITEM TOPSPIN4_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/fsr3.cpp")
 list(REMOVE_ITEM TOPSPIN4_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/gpu/dlss.cpp")
 
-add_executable(topspin4 ${TOPSPIN4_SOURCES} "${TS4_GENERATED}/fsr1_cs.h")
+add_executable(topspin4 ${TOPSPIN4_SOURCES} "${TS4_GENERATED}/fsr1_cs.h" ${TS4_MMIO_OBJECTS})
 target_include_directories(topspin4 PRIVATE
     include
     src
@@ -98,4 +125,6 @@ target_link_libraries(topspin4 PRIVATE
 )
 
 # Optional diagnostic target: link check
-add_subdirectory(tools/linkcheck linkcheck)
+if(NOT TS4_PREBUILT_PPC)
+    add_subdirectory(tools/linkcheck linkcheck)
+endif()
