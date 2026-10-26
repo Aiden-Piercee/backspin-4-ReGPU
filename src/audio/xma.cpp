@@ -768,7 +768,7 @@ void DecoderLoop()
 }
 }
 
-bool XmaRegisterWrite(uint32_t address, uint32_t value)
+bool XmaRegisterWrite(uint32_t address, uint32_t value, uint32_t r1, uint32_t lr)
 {
     if (!g_sync || !g_array)
         return false;
@@ -793,6 +793,26 @@ bool XmaRegisterWrite(uint32_t address, uint32_t value)
             const uint32_t c = g_array + i * kContextSize;
             Log("xma: ctx %u %s: %08X %08X %08X %08X %08X | %08X (thread %u)", i, clear ? "clear" : lock ? "lock" : "kick", LoadBE32(c),
                 LoadBE32(c + 4), LoadBE32(c + 8), LoadBE32(c + 12), LoadBE32(c + 16), LoadBE32(c + 36), CurrentGuestThreadId());
+            // Each distinct guest call chain that issues commands to a traced context, once: lr, then
+            // the return addresses along the back chain (saved at frame - 8 by the usual prologue).
+            static std::vector<std::string> chains;
+            char text[16];
+            snprintf(text, sizeof(text), "%08X", lr);
+            std::string chain = text;
+            for (uint32_t frame = r1, n = 0; n < 16 && frame && (frame & 3) == 0; n++)
+            {
+                const uint32_t next = LoadBE32(frame);
+                if (next <= frame || next - frame > 0x100000)
+                    break;
+                snprintf(text, sizeof(text), " %08X", LoadBE32(next - 8));
+                chain += text;
+                frame = next;
+            }
+            if (std::find(chains.begin(), chains.end(), chain) == chains.end())
+            {
+                chains.push_back(chain);
+                Log("xma: ctx %u %s from %s", i, clear ? "clear" : lock ? "lock" : "kick", chain.c_str());
+            }
         }
         if (clear)
         {
