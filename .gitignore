@@ -38,3 +38,6 @@ pipelines.manifest
 /*.raw
 /tools/audiotest/profile/
 /tools/audiotest/logs/
+prebuilt/
+user/
+game
