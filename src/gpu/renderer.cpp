@@ -6948,6 +6948,53 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
                 Log("perf: DrawInstanced took %.1f ms (vs %016llx ps %016llx)", ms, (unsigned long long)C().vsHash, (unsigned long long)C().psHash);
         }
     }
+    // EDRAM is one memory: a depth/stencil clear rectangle at the base the colour target also
+    // starts at leaves its packed words (depth in bits 8-31, stencil in 0-7) for the colour view to
+    // read, as 8:8:8:8 with red in bits 0-7. Titles clear a colour target that way through a
+    // depth-only MSAA view (Top Spin 4 clears its 1024x1024 shadow colour layer to white with a
+    // depth of 1/256). The host keeps colour and depth apart, so the clear is mirrored into the
+    // colour target over the rectangle. REGPU_NO_EDRAM_ALIAS_CLEAR=1: off.
+    if (static LiveSwitch noAliasClear("REGPU_NO_EDRAM_ALIAS_CLEAR"); !noAliasClear && (initiator & 0x3F) == 8 && edramMode == 5 && C().color &&
+        !ps.info.usedTextureSlots && !vs.info.usedTextureSlots && !vs.info.vertexFetchConstants.empty())
+    {
+        const uint32_t colorInfo = gpureg::Get(RB_COLOR_INFO), depthInfo = gpureg::Get(RB_DEPTH_INFO), depthControl = gpureg::Get(RB_DEPTHCONTROL);
+        const uint32_t stencilRefMask = gpureg::Get(RB_STENCILREFMASK);
+        const bool depthWrite = (depthControl >> 2) & 1, stencilWrite = (depthControl & 1) && ((stencilRefMask >> 16) & 0xFF);
+        const uint32_t colorFormat = (colorInfo >> 16) & 0xF;
+        // Screen-space rectangles (no viewport transform: the vertex z is the depth written) over
+        // an 8:8:8:8 colour target at the same EDRAM base.
+        if ((colorInfo & 0xFFF) == (depthInfo & 0xFFF) && (depthWrite || stencilWrite) && (colorFormat == 0 || colorFormat == 1) &&
+            (gpureg::Get(PA_CL_VTE_CNTL) & 0x3F) == 0)
+        {
+            const uint32_t k = vs.info.vertexFetchConstants[0];
+            const uint32_t d0 = gpureg::Get(gpureg::FetchConstants + k * 2), d1 = gpureg::Get(gpureg::FetchConstants + k * 2 + 1);
+            const uint32_t dwords = (d1 >> 2) & 0xFFFFFF;
+            if (dwords >= 3 * 7)
+            {
+                const uint32_t* v = GuestPtr<uint32_t>(GpuPhysToGuest(d0 & 0xFFFFFFFC));
+                auto f = [&](uint32_t i) { const uint32_t b = __builtin_bswap32(v[i]); float x; memcpy(&x, &b, 4); return x; };
+                // The three corners (x, y, z at the start of each 7-dword vertex), scaled like the
+                // draw itself when it is an MSAA view of the colour layout (vscale.w, voffset.w).
+                const float sx = vc->vscale[3] > 0 ? vc->vscale[3] : 1.0f, sy = vc->voffset[3] > 0 ? vc->voffset[3] : 1.0f;
+                const float x0 = std::min({ f(0), f(7), f(14) }) * sx, x1 = std::max({ f(0), f(7), f(14) }) * sx;
+                const float y0 = std::min({ f(1), f(8), f(15) }) * sy, y1 = std::max({ f(1), f(8), f(15) }) * sy;
+                D3D12_RECT r{ std::max<LONG>(LONG(x0), scissor.left), std::max<LONG>(LONG(y0), scissor.top), std::min<LONG>(LONG(x1), scissor.right),
+                    std::min<LONG>(LONG(y1), scissor.bottom) };
+                if (r.right > r.left && r.bottom > r.top)
+                {
+                    const float z = std::clamp(f(2), 0.0f, 1.0f);
+                    const uint32_t depthBits = ((depthInfo >> 16) & 1) ? EncodeDepth20e4(z) : uint32_t(std::lround(double(z) * 16777215.0));
+                    const uint32_t word = depthBits << 8 | (stencilWrite ? stencilRefMask & (stencilRefMask >> 16) & 0xFF : 0);
+                    const float color[4] = { float(word & 0xFF) / 255.0f, float((word >> 8) & 0xFF) / 255.0f, float((word >> 16) & 0xFF) / 255.0f,
+                        float(word >> 24) / 255.0f };
+                    const D3D12_RECT host = ToHost(r);
+                    C().list->ClearRenderTargetView(C().rtv, color, 1, &host);
+                    if (TraceFrame() && g_r.frame + 1 == TraceFrame())
+                        Log("    depth clear mirrored into colour: %ld,%ld-%ld,%ld word %08X", r.left, r.top, r.right, r.bottom, word);
+                }
+            }
+        }
+    }
     Section(6);
     g_r.drawsThisFrame++;
 }
