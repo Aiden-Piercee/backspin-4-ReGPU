@@ -28,6 +28,8 @@
 #include <windows.h>
 
 #include "kernel/imports.h"
+#include "kernel/objects.h"
+#include "kernel/thread.h"
 #include "log.h"
 #include "memory.h"
 #include "precise_sleep.h"
@@ -249,6 +251,10 @@ struct State
     int peak = 0;
     uint32_t lastValid = 0; // the input valid bits as the last pass saw or left them
     bool music = false;     // its input came from a music file read
+    // Traced contexts: the last kick, and whether the thread stacks were logged since (once a
+    // traced context goes 3 s without a kick, to show what its feeder waits on).
+    std::chrono::steady_clock::time_point lastKick{};
+    bool stacksLogged = true;
 };
 std::array<State, kContextCount> g_state{};
 void* g_packet = nullptr;
@@ -674,7 +680,16 @@ void DecoderLoop()
             PreciseSleepUntil(std::chrono::steady_clock::now() + std::chrono::microseconds(g_pollUs));
         else
             Sleep(1);
+        static bool logStacks = false;
+        if (logStacks)
+            logStacks = false, LogGuestThreads(); // outside the mutex: a kicking thread may be waiting on it
         std::lock_guard lock(g_mutex);
+        for (uint32_t i = 0; i < 64; i++)
+            if (Traced(i) && !g_state[i].stacksLogged && std::chrono::steady_clock::now() - g_state[i].lastKick > std::chrono::seconds(3))
+            {
+                g_state[i].stacksLogged = true, logStacks = true;
+                Log("xma: ctx %u not kicked for 3 s; guest threads follow", i);
+            }
         for (uint32_t group = 0; group < kContextCount / 32; group++)
         {
             const uint32_t clear = Register(kRegClear + group).exchange(0);
@@ -776,8 +791,8 @@ bool XmaRegisterWrite(uint32_t address, uint32_t value)
         {
             // What the title left in the context for this command: dwords 0-4 and 9.
             const uint32_t c = g_array + i * kContextSize;
-            Log("xma: ctx %u %s: %08X %08X %08X %08X %08X | %08X", i, clear ? "clear" : lock ? "lock" : "kick", LoadBE32(c),
-                LoadBE32(c + 4), LoadBE32(c + 8), LoadBE32(c + 12), LoadBE32(c + 16), LoadBE32(c + 36));
+            Log("xma: ctx %u %s: %08X %08X %08X %08X %08X | %08X (thread %u)", i, clear ? "clear" : lock ? "lock" : "kick", LoadBE32(c),
+                LoadBE32(c + 4), LoadBE32(c + 8), LoadBE32(c + 12), LoadBE32(c + 16), LoadBE32(c + 36), CurrentGuestThreadId());
         }
         if (clear)
         {
@@ -792,6 +807,7 @@ bool XmaRegisterWrite(uint32_t address, uint32_t value)
         else
         {
             s.kicks++;
+            s.lastKick = std::chrono::steady_clock::now(), s.stacksLogged = false;
             if (!g_used[i])
                 continue;
             s.works++;
