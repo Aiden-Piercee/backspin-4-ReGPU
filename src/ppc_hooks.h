@@ -16,13 +16,15 @@ void PPCMsrChanged(PPCContext& ctx, uint64_t oldMsr);
 // Memory-mapped stores (stwbrx to device registers). The XMA registers at 0x7FEA0000 reach the
 // decoder as they are written, as on the console, where a kick starts decoding before the title's
 // next write (audio/xma.cpp). `y` is the store's value as PPC_STORE_U32 takes it; the register
-// holds it byte-reversed (the title's stwbrx value). False: stored to memory as before.
-bool XmaRegisterWrite(uint32_t address, uint32_t value);
+// holds it byte-reversed (the title's stwbrx value). r1 and lr locate the guest caller (traces).
+// False: stored to memory as before.
+bool XmaRegisterWrite(uint32_t address, uint32_t value, uint32_t r1, uint32_t lr);
 #define PPC_MM_STORE_U32(x, y)                                                                      \
     do                                                                                              \
     {                                                                                               \
         const uint32_t mmAddress = uint32_t(x), mmValue = uint32_t(y);                              \
-        if ((mmAddress & 0xFFFF0000) != 0x7FEA0000 || !XmaRegisterWrite(mmAddress, __builtin_bswap32(mmValue))) \
+        if ((mmAddress & 0xFFFF0000) != 0x7FEA0000 ||                                               \
+            !XmaRegisterWrite(mmAddress, __builtin_bswap32(mmValue), ctx.r1.u32, uint32_t(ctx.lr))) \
             PPC_STORE_U32(mmAddress, mmValue);                                                      \
     } while (0)
 
