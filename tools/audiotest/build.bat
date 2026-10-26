@@ -1,6 +1,6 @@
 @echo off
-rem Builds build-audio: the host code only, linked with the recompiled-module libraries the main
-rem worktree already compiled (only read there; nothing in it is changed). One build serves every
+rem Builds build-audio: the host code only, linked with the recompiled-module libraries in prebuilt and
+rem the recompiled sources in out (see Build.bat). One build serves every
 rem variant: they differ only in TS4_XMA_* switches.
 setlocal
 cd /d "%~dp0..\.."
