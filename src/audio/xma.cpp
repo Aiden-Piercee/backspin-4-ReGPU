@@ -242,6 +242,10 @@ struct State
     // The decoded frame being written out (big-endian 16-bit, interleaved), and how far.
     std::array<uint8_t, kSamplesPerFrame * 2 * 2> frame{};
     uint32_t frameBlocks = 0, frameAt = 0;
+    // TS4_XMA_CARRY: the decoded frame's tail after the decoder's start padding, which begins the
+    // next frame's output (as ReXGlue realigns it).
+    std::array<uint8_t, kSamplesPerFrame * 2 * 2> carry{};
+    bool carryValid = false;
     // TS4_TRACE_XMA: what happened since the last report. Input buffers used up here and armed
     // (made valid) by the title, passes with no valid input or that filled the output ring.
     uint32_t kicks = 0, works = 0, frames = 0, waits = 0, used = 0, armed = 0, starved = 0, full = 0;
@@ -280,6 +284,8 @@ const bool g_retryLocked = EnvOn("TS4_XMA_RETRY_LOCKED");
 // memory-mapped stores), as ReXGlue and the console do: a kick decodes at once, a lock waits for
 // a pass in progress. TS4_XMA_SYNC=0: they go to memory and the decoder thread polls them.
 const bool g_sync = !getenv("TS4_XMA_SYNC") || EnvOn("TS4_XMA_SYNC");
+const bool g_carry = EnvOn("TS4_XMA_CARRY"); // off by default: it did not change the music stop
+constexpr uint32_t kDecoderStartPadding = 192; // samples per channel (ReXGlue's figure)
 const int g_pollUs = getenv("TS4_XMA_POLL_US") ? atoi(getenv("TS4_XMA_POLL_US")) : 0;
 const bool g_trace = EnvOn("TS4_TRACE_XMA");
 // The physical ranges the last few music file reads went to (kernel/imports_io.cpp), so the
@@ -304,6 +310,7 @@ void ResetState(State& s)
     if (s.decoder)
         av::flush(s.decoder);
     s.frameBlocks = s.frameAt = 0;
+    s.carryValid = false;
 }
 
 // The title accesses these registers byte-reversed (lwbrx/stwbrx), so they hold host-order
@@ -395,7 +402,10 @@ void DecodeFrame(State& s, const uint8_t* bits, uint32_t at, uint32_t length)
     g_statFrames++;
     s.frames++;
     if (!s.decoder || av::newPacket(g_packet, int(kBytesPerPacket)) < 0)
+    {
+        s.carryValid = false;
         return;
+    }
     uint8_t* packet = av::At<uint8_t*>(g_packet, av::kPacketData);
     memset(packet, 0, kBytesPerPacket);
     // One frame, starting right after the header; no more frames follow it in the packet.
@@ -408,6 +418,7 @@ void DecodeFrame(State& s, const uint8_t* bits, uint32_t at, uint32_t length)
     if (sent < 0)
     {
         g_statFailed++, g_statLastError = sent;
+        s.carryValid = false;
         return;
     }
     for (;;)
@@ -454,6 +465,24 @@ void DecodeFrame(State& s, const uint8_t* bits, uint32_t at, uint32_t length)
         }
         if (dumps[index])
             fwrite(s.frame.data(), 1, bytes, dumps[index]), fflush(dumps[index]);
+    }
+    // TS4_XMA_CARRY (default on): realign onto the bitstream's sample numbering as ReXGlue does. A
+    // frame's samples run from the decoder's start padding into this block and end in the head of
+    // the next one, so the output is a frame behind the input: a stream's first frame writes
+    // nothing, and its last input buffer is used up before its last samples are read.
+    if (g_carry)
+    {
+        const size_t pad = size_t(kDecoderStartPadding) * 2 * s.channels, rest = bytes - pad;
+        const std::array<uint8_t, kSamplesPerFrame * 2 * 2> decoded = s.frame;
+        if (s.carryValid)
+        {
+            memcpy(s.frame.data(), s.carry.data(), rest);
+            memcpy(s.frame.data() + rest, decoded.data(), pad);
+        }
+        else
+            s.frameBlocks = 0;
+        memcpy(s.carry.data(), decoded.data() + pad, rest);
+        s.carryValid = true;
     }
 }
 
@@ -610,6 +639,7 @@ void Work(uint32_t index)
         s.channels = channels;
         s.rate = rate;
         s.frameBlocks = s.frameAt = 0;
+        s.carryValid = false;
         if (av::g_ok && !s.decoder)
             Log("xma: context %u: the decoder did not open (%d channels, %d Hz)", index, channels, rate);
     }
@@ -642,7 +672,7 @@ void Work(uint32_t index)
         }
         s.frameAt += n;
         room -= n;
-        if (s.frameAt == s.frameBlocks)
+        if (s.frameBlocks && s.frameAt == s.frameBlocks)
             room -= std::min(room, padding);
     }
     // Merged into the context as it is now: the title updates it while this runs (refilling
