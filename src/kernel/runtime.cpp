@@ -85,6 +85,11 @@ void RuntimeInit(const std::filesystem::path& gameDir)
         Log("runtime: quit from the launcher");
         std::_Exit(0);
     }
+    // Top Spin 4 paces itself on the 60 Hz vblank, presenting on every one or every second one.
+    // ReGPU's frame limiter and the swap chain's vsync are two more 60 Hz clocks out of phase with
+    // it, and frames that wait on all three stutter. Neither is needed: the vblank sets the rate.
+    GetSettings().vsync = false;
+    GetSettings().maxFps = 1000;
     // Side-by-side test instances: REGPU_WINDOW_TITLE names the window, REGPU_OUTPUT_SIZE=WxH
     // sets its size (the window position: REGPU_MONITOR, REGPU_WINDOW_SLOT in presenter.cpp).
     if (const wchar_t* title = _wgetenv(L"REGPU_WINDOW_TITLE"); title && *title)
