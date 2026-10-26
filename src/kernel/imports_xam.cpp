@@ -6,6 +6,8 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "gpu/renderer.h"
@@ -160,15 +162,39 @@ GUEST_EXPORT(XamUserAreUsersFriends)
     Return(ctx, X_ERROR_NO_SUCH_USER);
 }
 
+// Profile settings the title wrote (XamUserWriteProfileSettings), read back as it wrote them. A
+// title keeps its options (volumes among them) in its title-specific settings; answering them as
+// "not set" after a write hands the title zeros.
+//
+// XUSER_PROFILE_SETTING (0x28): source 0x00 (0 not set, 1 default, 2 title), user index or xuid
+// 0x08, id 0x10, XUSER_DATA 0x18 { u8 type; ...; union at +8: value, or { u32 size, u32 ptr } }.
+// A setting id holds its type in bits 28-31 and its largest size in bits 16-27.
+struct ProfileSetting
+{
+    uint8_t type = 0;
+    uint8_t value[8] = {};         // the union's first 8 bytes, as the title wrote them
+    std::vector<uint8_t> bytes;    // binary and string data
+};
+std::mutex g_profileMutex;
+std::unordered_map<uint32_t, ProfileSetting> g_profileSettings;
+constexpr uint8_t kDataUnicode = 4, kDataBinary = 6, kDataContext = 0;
+bool HasPayload(uint8_t type) { return type == kDataUnicode || type == kDataBinary; }
+
 GUEST_EXPORT(XamUserReadProfileSettings)
 {
     // (titleId, user, xuidCount, xuids, settingCount, settingIds*, bufferSize*, buffer, overlapped)
-    // Answer every setting as "not set": the title then uses its defaults.
+    // Settings the title wrote come back as written; the rest as "not set" (its defaults).
     const uint32_t settingCount = ctx.r7.u32, settingIds = ctx.r8.u32, sizePtr = ctx.r9.u32, buffer = ctx.r10.u32;
     const uint32_t overlapped = StackArg(ctx, 8);
-    // XUSER_READ_PROFILE_SETTING_RESULT { u32 count, u32 settings* } then
-    // XUSER_PROFILE_SETTING { u32 source, u32 user, u64 xuid? ..., u32 id, XUSER_DATA (0x10) } of 0x28 bytes.
-    const uint32_t needed = 8 + settingCount * 0x28;
+    // XUSER_READ_PROFILE_SETTING_RESULT { u32 count, u32 settings* }, the settings, then their data.
+    const uint32_t headers = 8 + settingCount * 0x28;
+    uint32_t needed = headers;
+    for (uint32_t i = 0; i < settingCount; i++)
+    {
+        const uint32_t id = LoadBE32(settingIds + i * 4);
+        if (HasPayload(uint8_t(id >> 28)))
+            needed += (id >> 16) & 0xFFF;
+    }
     if (!buffer || LoadBE32(sizePtr) < needed)
     {
         StoreBE32(sizePtr, needed);
@@ -178,13 +204,35 @@ GUEST_EXPORT(XamUserReadProfileSettings)
     memset(GuestPtr(buffer), 0, needed);
     StoreBE32(buffer, settingCount);
     StoreBE32(buffer + 4, buffer + 8);
+    uint32_t data = buffer + headers;
+    std::string ids;
+    std::lock_guard lock(g_profileMutex);
     for (uint32_t i = 0; i < settingCount; i++)
     {
-        const uint32_t s = buffer + 8 + i * 0x28;
-        StoreBE32(s + 0x00, 0); // source: not set (default)
-        StoreBE32(s + 0x04, ctx.r4.u32);
-        StoreBE32(s + 0x10, LoadBE32(settingIds + i * 4));
+        const uint32_t s = buffer + 8 + i * 0x28, id = LoadBE32(settingIds + i * 4);
+        StoreBE32(s + 0x08, ctx.r4.u32);
+        StoreBE32(s + 0x10, id);
+        char text[24];
+        const auto it = g_profileSettings.find(id);
+        snprintf(text, sizeof(text), " %08X%s", id, it != g_profileSettings.end() ? "(set)" : "");
+        ids += text;
+        if (it == g_profileSettings.end())
+            continue; // source 0: not set
+        const ProfileSetting& setting = it->second;
+        StoreBE32(s + 0x00, (id & 0xFFFF) >= 0x3FFD ? 2 : 1); // title-specific 1-3 (ids 0x3FFD-0x3FFF) come from the title
+        *GuestPtr<uint8_t>(s + 0x18) = setting.type;
+        if (HasPayload(setting.type))
+        {
+            const uint32_t size = std::min<uint32_t>(uint32_t(setting.bytes.size()), (id >> 16) & 0xFFF);
+            memcpy(GuestPtr(data), setting.bytes.data(), size);
+            StoreBE32(s + 0x18 + 8, size);
+            StoreBE32(s + 0x18 + 12, data);
+            data += (id >> 16) & 0xFFF;
+        }
+        else
+            memcpy(GuestPtr(s + 0x18 + 8), setting.value, 8);
     }
+    Log("xam: read profile settings (user %u):%s", ctx.r4.u32, ids.c_str());
     if (overlapped)
     {
         CompleteOverlapped(overlapped, X_ERROR_SUCCESS);
@@ -192,6 +240,62 @@ GUEST_EXPORT(XamUserReadProfileSettings)
         return;
     }
     Return(ctx, X_ERROR_SUCCESS);
+}
+
+GUEST_EXPORT(XamUserWriteProfileSettings)
+{
+    // (titleId, user, settingCount, settings*, overlapped)
+    const uint32_t user = ctx.r4.u32, count = ctx.r5.u32, settings = ctx.r6.u32, overlapped = ctx.r7.u32;
+    uint32_t result = X_ERROR_SUCCESS;
+    if (!count || !settings)
+        result = 87; // ERROR_INVALID_PARAMETER
+    else if (user != 0)
+        result = X_ERROR_NO_SUCH_USER;
+    else
+    {
+        std::string ids;
+        std::lock_guard lock(g_profileMutex);
+        for (uint32_t i = 0; i < count; i++)
+        {
+            const uint32_t s = settings + i * 0x28, id = LoadBE32(s + 0x10);
+            ProfileSetting setting;
+            setting.type = *GuestPtr<uint8_t>(s + 0x18);
+            if (setting.type == kDataContext)
+                continue; // unset
+            if (HasPayload(setting.type))
+            {
+                const uint32_t size = LoadBE32(s + 0x18 + 8), ptr = LoadBE32(s + 0x18 + 12);
+                setting.bytes.resize(size);
+                if (ptr && size)
+                    memcpy(setting.bytes.data(), GuestPtr(ptr), size);
+            }
+            else
+                memcpy(setting.value, GuestPtr(s + 0x18 + 8), 8);
+            char text[32];
+            snprintf(text, sizeof(text), " %08X(type %u, %zu bytes)", id, setting.type, setting.bytes.size());
+            ids += text;
+            // The data, as hex (trailing zeros left out), to see what the title keeps there.
+            size_t used = setting.bytes.size();
+            while (used && !setting.bytes[used - 1])
+                used--;
+            std::string hex;
+            for (size_t b = 0; b < used; b++)
+            {
+                snprintf(text, sizeof(text), "%02X", setting.bytes[b]);
+                hex += text;
+            }
+            Log("xam:   %08X: %zu bytes up to the last non-zero: %s", id, used, hex.c_str());
+            g_profileSettings[id] = std::move(setting);
+        }
+        Log("xam: wrote profile settings:%s", ids.c_str());
+    }
+    if (overlapped)
+    {
+        CompleteOverlapped(overlapped, result);
+        Return(ctx, X_ERROR_IO_PENDING);
+        return;
+    }
+    Return(ctx, result);
 }
 
 GUEST_EXPORT(XamUserCreateStatsEnumerator)
@@ -987,8 +1091,12 @@ GUEST_EXPORT(XMsgInProcessCall)
         StoreIfNonNull(LoadBE32(args + 4), bits);
         break;
     }
-    case 0x0007001B: // get dashboard init state (client, state*)
+    case 0x0007001B: // XMPGetPlaybackController (client, controller*, locked*)
+        // The title controls playback and the user hasn't taken it over. Leaving `locked` unwritten
+        // handed the title stack garbage: read as the user's own soundtrack playing, the title faded
+        // its music out (Top Spin 4, 2 s into its menu music).
         StoreIfNonNull(LoadBE32(args + 4), 0);
+        StoreIfNonNull(LoadBE32(args + 8), 0);
         break;
     default:
         LOG_ONCE("XMP message %08X answered with success", message);
