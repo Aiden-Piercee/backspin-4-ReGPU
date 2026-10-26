@@ -243,6 +243,9 @@ struct State
     // TS4_TRACE_XMA: what happened since the last report. Input buffers used up here and armed
     // (made valid) by the title, passes with no valid input or that filled the output ring.
     uint32_t kicks = 0, works = 0, frames = 0, waits = 0, used = 0, armed = 0, starved = 0, full = 0;
+    // Lock bits the title wrote, kicked passes skipped because the context was locked at the
+    // check, and passes that found no output buffer or no room in it.
+    uint32_t locks = 0, lockSkips = 0, noOutput = 0, noRoom = 0;
     int peak = 0;
     uint32_t lastValid = 0; // the input valid bits as the last pass saw or left them
     bool music = false;     // its input came from a music file read
@@ -264,6 +267,13 @@ bool EnvOn(const char* name)
 }
 const bool g_rotate = getenv("TS4_XMA_606") && strcmp(getenv("TS4_XMA_606"), "rotate") == 0;
 const bool g_continuous = EnvOn("TS4_XMA_CONTINUOUS");
+// TS4_XMA_RETRY_LOCKED=1: a kicked pass skipped because the context is locked stays pending
+// and runs on a later poll, instead of the kick being dropped.
+const bool g_retryLocked = EnvOn("TS4_XMA_RETRY_LOCKED");
+// Kick, Lock and Clear writes handled as they are written (XmaRegisterWrite, from the title's
+// memory-mapped stores), as ReXGlue and the console do: a kick decodes at once, a lock waits for
+// a pass in progress. TS4_XMA_SYNC=0: they go to memory and the decoder thread polls them.
+const bool g_sync = !getenv("TS4_XMA_SYNC") || EnvOn("TS4_XMA_SYNC");
 const int g_pollUs = getenv("TS4_XMA_POLL_US") ? atoi(getenv("TS4_XMA_POLL_US")) : 0;
 const bool g_trace = EnvOn("TS4_TRACE_XMA");
 // The physical ranges the last few music file reads went to (kernel/imports_io.cpp), so the
@@ -568,7 +578,10 @@ void Work(uint32_t index)
             Log("xma: ctx %u plays music", index);
     }
     if (!Bits(f.d[1], 31, 1))
+    {
+        s.noOutput++;
         return; // no output buffer
+    }
     const int channels = Bits(f.d[1], 29, 1) ? 2 : 1;
     static const int kRates[4] = { 24000, 32000, 44100, 48000 };
     const int rate = kRates[Bits(f.d[1], 27, 2)];
@@ -595,7 +608,10 @@ void Work(uint32_t index)
     // and output_buffer_padding blocks besides; the padding is kept free after each frame.
     const uint32_t step = std::max(1u, Bits(f.d[1], 20, 4)), padding = Bits(f.d[1], 24, 3);
     if (room < step + padding)
+    {
+        s.noRoom++;
         return;
+    }
 
     while (room >= step + padding)
     {
@@ -637,8 +653,9 @@ void Work(uint32_t index)
 void DecoderLoop()
 {
     SetThreadDescription(GetCurrentThread(), L"xma decoder");
-    Log("xma: current-context register %s, %s, polled every %d us", g_rotate ? "rotating" : "busy while decoding",
-        g_continuous ? "kicked contexts stay enabled" : "one pass per kick", g_pollUs > 0 ? g_pollUs : 1000);
+    Log("xma: kick/lock/clear %s; current-context register %s, %s, polled every %d us",
+        g_sync ? "handled as written" : "polled", g_rotate ? "rotating" : "busy while decoding",
+        g_continuous ? "kicked contexts stay enabled" : g_retryLocked ? "one pass per kick, retried when locked" : "one pass per kick", g_pollUs > 0 ? g_pollUs : 1000);
     uint32_t rotating = 1;
     for (;;)
     {
@@ -664,7 +681,7 @@ void DecoderLoop()
                     g_state[index].enabled = false;
                 }
                 if (locked >> bit & 1)
-                    g_state[index].enabled = false;
+                    g_state[index].enabled = false, g_state[index].locks++;
                 if (kick >> bit & 1)
                     g_state[index].enabled = true, g_state[index].kicks++;
             }
@@ -681,7 +698,12 @@ void DecoderLoop()
                 if (!g_rotate)
                     Register(kRegCurrentContext).store(kBusy | i);
                 if (Register(kRegLock + i / 32).load() >> (i % 32) & 1)
+                {
+                    g_state[i].lockSkips++;
+                    if (g_retryLocked)
+                        g_state[i].enabled = true;
                     continue;
+                }
                 g_state[i].works++;
                 Work(i);
             }
@@ -704,11 +726,12 @@ void DecoderLoop()
                 const uint32_t c = g_array + i * kContextSize;
                 const uint32_t d0 = LoadBE32(c), d1 = LoadBE32(c + 4), d2 = LoadBE32(c + 8), d4 = LoadBE32(c + 16);
                 if (g_used[i] && (st.music || (Bits(d1, 29, 1) && (st.kicks || st.works))))
-                    Log("xma:   ctx %u%s: kicks %u passes %u frames %u peak %d | buffers used %u armed %u, waits %u, starved %u, full %u | "
+                    Log("xma:   ctx %u%s: kicks %u locks %u lock-skips %u passes %u (no output %u, no room %u) frames %u peak %d | buffers used %u armed %u, waits %u, starved %u, full %u | "
                         "in0 %u pkts v%u, in1 %u pkts v%u, cur %u, read %u, out w%u r%u of %u v%u, %s",
-                        i, st.music ? " MUSIC" : "", st.kicks, st.works, st.frames, st.peak, st.used, st.armed, st.waits, st.starved, st.full,
+                        i, st.music ? " MUSIC" : "", st.kicks, st.locks, st.lockSkips, st.works, st.noOutput, st.noRoom, st.frames, st.peak, st.used, st.armed, st.waits, st.starved, st.full,
                         Bits(d0, 0, 12), Bits(d0, 20, 1), Bits(d1, 0, 12), Bits(d0, 21, 1), Bits(d4, 31, 1), Bits(d2, 0, 26), Bits(d0, 27, 5),
                         Bits(LoadBE32(c + 36), 0, 5), Bits(d0, 22, 5), Bits(d1, 31, 1), Bits(d1, 29, 1) ? "stereo" : "mono");
+                st.locks = st.lockSkips = st.noOutput = st.noRoom = 0;
                 st.kicks = st.works = st.frames = st.waits = st.used = st.armed = st.starved = st.full = 0;
                 st.peak = 0;
             }
@@ -717,6 +740,48 @@ void DecoderLoop()
         }
     }
 }
+}
+
+bool XmaRegisterWrite(uint32_t address, uint32_t value)
+{
+    if (!g_sync || !g_array)
+        return false;
+    const uint32_t index = (address & 0xFFFF) / 4;
+    const bool kick = index >= kRegKick && index < kRegKick + kContextCount / 32;
+    const bool lock = index >= kRegLock && index < kRegLock + kContextCount / 32;
+    const bool clear = index >= kRegClear && index < kRegClear + kContextCount / 32;
+    if (!kick && !lock && !clear)
+        return false;
+    // The decoder thread holds the mutex for a whole pass: taking it is the wait for one in progress.
+    std::lock_guard guard(g_mutex);
+    const uint32_t group = kick ? index - kRegKick : lock ? index - kRegLock : index - kRegClear;
+    for (uint32_t bit = 0; bit < 32; bit++)
+    {
+        if (!(value >> bit & 1))
+            continue;
+        const uint32_t i = group * 32 + bit;
+        State& s = g_state[i];
+        if (clear)
+        {
+            if (g_trace && s.music)
+                Log("xma: ctx %u (music) cleared", i);
+            Clear(g_array + i * kContextSize);
+            ResetState(s);
+            s.enabled = false;
+        }
+        else if (lock)
+            s.enabled = false, s.locks++;
+        else
+        {
+            s.kicks++;
+            if (!g_used[i])
+                continue;
+            s.works++;
+            Work(i);
+            s.enabled = g_continuous;
+        }
+    }
+    return true;
 }
 
 void XmaInit()
