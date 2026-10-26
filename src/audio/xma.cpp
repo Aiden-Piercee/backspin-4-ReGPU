@@ -433,11 +433,22 @@ void DecodeFrame(State& s, const uint8_t* bits, uint32_t at, uint32_t length)
         }
         av::frameUnref(g_frame);
     }
-    // TS4_XMA_DUMP=<file>: the first decoding context's samples, raw (16-bit big-endian).
-    static FILE* dump = getenv("TS4_XMA_DUMP") ? fopen(getenv("TS4_XMA_DUMP"), "wb") : nullptr;
-    static const State* dumped = &s;
-    if (dump && dumped == &s)
-        fwrite(s.frame.data(), 1, bytes, dump), fflush(dump);
+    // TS4_XMA_DUMP=<prefix>: each context's decoded frames, raw (16-bit big-endian, interleaved),
+    // in <prefix>.ctx<n>.raw (a context's channels can change when the title reuses it).
+    static const char* dumpPrefix = getenv("TS4_XMA_DUMP");
+    static std::array<FILE*, kContextCount> dumps{};
+    const size_t index = size_t(&s - g_state.data());
+    if (dumpPrefix && index < kContextCount)
+    {
+        if (!dumps[index])
+        {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s.ctx%zu.raw", dumpPrefix, index);
+            dumps[index] = fopen(path, "wb");
+        }
+        if (dumps[index])
+            fwrite(s.frame.data(), 1, bytes, dumps[index]), fflush(dumps[index]);
+    }
 }
 
 // The first frame of a packet of this buffer from packet `index` on, as a read offset; 0 if no
@@ -761,6 +772,13 @@ bool XmaRegisterWrite(uint32_t address, uint32_t value)
             continue;
         const uint32_t i = group * 32 + bit;
         State& s = g_state[i];
+        if (Traced(i))
+        {
+            // What the title left in the context for this command: dwords 0-4 and 9.
+            const uint32_t c = g_array + i * kContextSize;
+            Log("xma: ctx %u %s: %08X %08X %08X %08X %08X | %08X", i, clear ? "clear" : lock ? "lock" : "kick", LoadBE32(c),
+                LoadBE32(c + 4), LoadBE32(c + 8), LoadBE32(c + 12), LoadBE32(c + 16), LoadBE32(c + 36));
+        }
         if (clear)
         {
             if (g_trace && s.music)
@@ -836,8 +854,8 @@ GUEST_EXPORT(XMAReleaseContext)
     const uint32_t index = ((ctx.r3.u32 & 0x1FFFFFFF) - (g_array & 0x1FFFFFFF)) / kContextSize;
     if (index < kContextCount)
     {
-        if (g_trace && g_state[index].music)
-            Log("xma: ctx %u (music) released", index);
+        if ((g_trace && g_state[index].music) || Traced(index))
+            Log("xma: ctx %u released", index);
         g_state[index].music = false;
         g_used[index] = false;
         ResetState(g_state[index]);
