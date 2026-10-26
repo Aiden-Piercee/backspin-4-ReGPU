@@ -1239,6 +1239,14 @@ Renderer::Surface& GetSurface(bool depth, uint32_t base)
         dsvDesc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
         dsvDesc.ViewDimension = g_msaa > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
         C().list->CreateDepthStencilView(g_r.device, s.resource.Get(), dsvDesc, s.view); // in order with the recorded commands
+        // A depth surface the title tests against before anything writes it reads, on the console,
+        // whatever EDRAM held there: mostly a colour target with opaque alpha, which as depth is
+        // about 1.0. A new host resource reads 0 instead, and a less-or-equal pass against it never
+        // drew (Top Spin 4's bloom downsample into a 640x360 view whose depth it never clears: the
+        // composite then added a 2x blow-up of the scene's corner, posters ghosting over the
+        // players). New depth surfaces start at the far plane. REGPU_NO_DEPTH_INIT_FAR=1: unset.
+        if (static LiveSwitch noFar("REGPU_NO_DEPTH_INIT_FAR"); !noFar)
+            C().list->ClearDepthStencilView(s.view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     }
     else
     {
