@@ -4,6 +4,7 @@
 // whose shade pulses with the frame count, proving the path end to end.
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -455,6 +456,33 @@ bool PresenterRecordCopy(ID3D12GraphicsCommandList* list, ID3D12Resource* src, I
     return true;
 }
 
+// Frame rate and frame time (average and worst over the last half second) in the title bar.
+// REGPU_NO_TITLE_STATS=1 (read at start) leaves the title alone.
+static void UpdateTitleStats()
+{
+    static const bool off = getenv("REGPU_NO_TITLE_STATS") != nullptr;
+    if (off || !g_p.window)
+        return;
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last = Clock::now(), windowStart = last;
+    static uint32_t frames = 0;
+    static double worstMs = 0;
+    const Clock::time_point now = Clock::now();
+    worstMs = std::max(worstMs, std::chrono::duration<double, std::milli>(now - last).count());
+    last = now;
+    frames++;
+    const double span = std::chrono::duration<double>(now - windowStart).count();
+    if (span < 0.5)
+        return;
+    wchar_t title[160];
+    swprintf(title, 160, L"%ls - %.0f fps  %.1f ms (max %.1f ms)", GetSettings().windowTitle.c_str(), frames / span, 1000.0 * span / frames, worstMs);
+    // The window belongs to another thread: don't wait on it if it is busy.
+    SendMessageTimeoutW(g_p.window, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(title), SMTO_ABORTIFHUNG, 50, nullptr);
+    windowStart = now;
+    frames = 0;
+    worstMs = 0;
+}
+
 void PresenterPresent()
 {
     // Vsync: wait for the display's refresh; off: present at once (tearing allowed).
@@ -464,6 +492,7 @@ void PresenterPresent()
             g_p.swapChain->Present(1, 0);
         else
             g_p.swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+        UpdateTitleStats();
     }
 }
 
