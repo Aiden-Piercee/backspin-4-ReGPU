@@ -27,6 +27,11 @@ d3dcompiler_47.dll
 pipelines.bin
 pipelines.manifest
 
+# User data, saves, profiles, settings
+user/
+/user/
+*.ini
+
 # Game data
 *.xex
 *.arc
