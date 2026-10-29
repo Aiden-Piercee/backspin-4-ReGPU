@@ -203,6 +203,29 @@ Alu DecodeAlu(const uint32_t* w)
     return a;
 }
 
+bool Plausible(const Shader& shader)
+{
+    if (!shader.valid)
+        return false;
+    for (const Cf& cf : shader.cf)
+    {
+        if (!cf.IsExec())
+            continue;
+        for (uint32_t k = 0; k < cf.count(); k++)
+        {
+            const uint32_t index = cf.address() + k;
+            if (index * 3 + 2 >= shader.words.size())
+                return false;
+            if ((cf.sequence() >> (2 * k)) & 1)
+                continue; // vertex fetch: no opcode to check
+            const Alu a = DecodeAlu(&shader.words[index * 3]);
+            if (kVectorOps[a.vectorOp][0] == '?' || kScalarOps[a.scalarOp][0] == '?')
+                return false;
+        }
+    }
+    return true;
+}
+
 Fetch DecodeFetch(const uint32_t* w)
 {
     Fetch f{};

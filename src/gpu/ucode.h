@@ -98,6 +98,9 @@ Shader Parse(const uint32_t* microcodeBE, uint32_t dwords, bool pixel);
 // per-load stamp after that, so hashes cover only this much. Returns dwords when the
 // control flow has calls or jumps or doesn't parse.
 uint32_t UsedDwords(const uint32_t* microcodeBE, uint32_t dwords);
+// Whether the microcode can plausibly be a shader at all: valid control flow, and every ALU
+// instruction using an opcode the ISA defines.
+bool Plausible(const Shader& shader);
 Alu DecodeAlu(const uint32_t* words);
 Fetch DecodeFetch(const uint32_t* words);
 std::string Disassemble(const Shader& shader);

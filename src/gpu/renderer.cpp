@@ -3648,7 +3648,13 @@ bool BuildIndexList(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize, std:
         {
             const uint32_t pos = uint32_t(out.size());
             out.insert(out.end(), { g[i], g[i + 1], g[i + 2] });
-            for (uint32_t role : { 1u, 2u, 0u })
+            // The Xenos draws each rectangle as one primitive with the given triangle's facing. The second
+            // triangle is ordered (first hypotenuse end, fourth corner, second end), which keeps that
+            // winding: the other order faced the other way, so a draw with separate back-face stencil ops
+            // applied them to half of every rectangle. From the FM4 port. REGPU_OLD_RECT_WINDING=1 (read
+            // at start): the old order (A/B).
+            static const bool oldWinding = getenv("REGPU_OLD_RECT_WINDING") != nullptr;
+            for (uint32_t role : oldWinding ? std::initializer_list<uint32_t>{ 1u, 2u, 0u } : std::initializer_list<uint32_t>{ 1u, 0u, 2u })
                 out.push_back(0x80000000u | (role << 29) | pos);
         }
         return true;
@@ -4794,6 +4800,8 @@ void DrainScan(double budgetMs, std::vector<const CompiledShader*>* queued = nul
             return;
         for (ScannedShader& s : found)
         {
+            if (!ucode::Plausible(ucode::Parse(s.code.data(), uint32_t(s.code.size()), s.pixel)))
+                continue;
             const uint64_t hash = Fnv(s.code.data(), s.code.size() * 4) ^ (s.pixel ? 1 : 0);
             g_scanKnown.insert(hash);
             // Speculative (and partly stale memory): compiled when nothing urgent waits,
@@ -5314,6 +5322,8 @@ void RendererPredictBegin()
 void RendererPredictShader(uint32_t type, const uint32_t* microcodeBE, uint32_t dwords)
 {
     dwords = ucode::UsedDwords(microcodeBE, dwords);
+    if (!dwords || !ucode::Plausible(ucode::Parse(microcodeBE, dwords, type != 0)))
+        return;
     const uint64_t hash = Fnv(microcodeBE, dwords * 4) ^ type;
     if (type == 0)
     {
@@ -5955,6 +5965,18 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     static LiveSwitch noRender("REGPU_NO_RENDER");
     if (noRender)
         return;
+    // A draw with PA_SC_VIZ_QUERY.kill_pix_post_hi_z (bit 7) is viz query survey geometry: it only feeds
+    // the hierarchical-Z visibility test of its query ID, and the hardware kills its pixels after hi-Z,
+    // so it writes no colour, depth or stencil and no ZPD report counts it. Nothing here predicates
+    // draws on viz queries, so a survey has nothing to feed and isn't drawn (titles may draw them with
+    // debug shaders: solid boxes). From the FM4 port. REGPU_VIZ_QUERY_DRAWS=1 draws them (A/B).
+    static LiveSwitch vizQueryDraws("REGPU_VIZ_QUERY_DRAWS");
+    if (!vizQueryDraws && (gpureg::Get(0x2293 /* PA_SC_VIZ_QUERY */) >> 7 & 1))
+    {
+        TraceSkip("viz query survey", initiator);
+        g_r.skippedThisFrame++;
+        return;
+    }
     if (!g_r.ok)
         Init();
     const uint32_t edramMode = gpureg::Get(RB_MODECONTROL) & 7;
@@ -7339,6 +7361,8 @@ void PrecompileAll()
         BootPresent(bootFrame);
     for (const regpu::ScannedShader& s : host.staticShaders())
     {
+        if (!ucode::Plausible(ucode::Parse(s.code.data(), uint32_t(s.code.size()), s.pixel)))
+            continue;
         const uint64_t hash = Fnv(s.code.data(), s.code.size() * 4) ^ (s.pixel ? 1 : 0);
         if (g_r.shaders.count(hash))
             continue;
