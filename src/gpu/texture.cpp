@@ -26,6 +26,7 @@ enum Format : uint32_t
     k_16_16_16_16_FLOAT = 32, // half floats; uploaded as they are (lookup tables, HDR data)
     k_DXN = 49,   // two interpolated channels (BC5): normal maps
     k_DXT5A = 59, // one interpolated channel (BC4-like), 8-byte blocks
+    k_CTX1 = 60,  // two channels (x, y) in 8-byte blocks: normal maps
 };
 
 struct FormatInfo
@@ -48,6 +49,7 @@ bool Info(uint32_t format, FormatInfo& out)
     case k_DXT2_3:
     case k_DXT4_5: out = { 4, 4 }; return true;
     case k_DXT5A: out = { 4, 3 }; return true;
+    case k_CTX1: out = { 4, 3 }; return true;
     case k_DXN: out = { 4, 4 }; return true;
     case k_16_16_16_16_FLOAT: out = { 1, 3 }; return true;
     default: return false;
@@ -143,6 +145,29 @@ void DecodeBlock(uint32_t format, const uint8_t* b, uint8_t out[16][4])
         DecodeAlphaBlock(b, out);
         for (int i = 0; i < 16; i++)
             out[i][0] = out[i][1] = out[i][2] = out[i][3];
+        return;
+    }
+    if (format == k_CTX1)
+    {
+        // Two 8:8 (x, y) endpoints, then 2-bit indices: the endpoints and their thirds (as DXT1's
+        // colours). Normal maps: the shader rebuilds z from x and y.
+        uint8_t palette[4][2];
+        for (int k = 0; k < 2; k++)
+        {
+            palette[0][k] = b[k];
+            palette[1][k] = b[2 + k];
+            palette[2][k] = uint8_t((2 * palette[0][k] + palette[1][k]) / 3);
+            palette[3][k] = uint8_t((palette[0][k] + 2 * palette[1][k]) / 3);
+        }
+        const uint32_t bits = uint32_t(b[4]) | (uint32_t(b[5]) << 8) | (uint32_t(b[6]) << 16) | (uint32_t(b[7]) << 24);
+        for (int i = 0; i < 16; i++)
+        {
+            const uint8_t* c = palette[(bits >> (i * 2)) & 3];
+            out[i][0] = c[0];
+            out[i][1] = c[1];
+            out[i][2] = 0;
+            out[i][3] = 255;
+        }
         return;
     }
     if (format == k_DXN)
@@ -268,8 +293,9 @@ TextureFetch ReadTextureFetch(uint32_t slot)
 
 bool TextureFormatSupported(uint32_t format)
 {
+    static LiveSwitch noCtx1("REGPU_NO_CTX1"); // A/B: CTX1 normal maps bound as the white fallback (before)
     FormatInfo info;
-    return Info(format, info);
+    return Info(format, info) && !(format == k_CTX1 && noCtx1);
 }
 
 const char* TextureFormatName(uint32_t format)
@@ -287,6 +313,7 @@ const char* TextureFormatName(uint32_t format)
     case k_DXT4_5: return "DXT5";
     case k_DXT5A: return "DXT5A";
     case k_DXN: return "DXN";
+    case k_CTX1: return "CTX1";
     case k_16_16_16_16_FLOAT: return "16161616F";
     default:
     {

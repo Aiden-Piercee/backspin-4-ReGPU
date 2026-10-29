@@ -30,7 +30,9 @@ struct Config
     uint32_t quality = 1;   // 0 native (anti-aliasing only), 1 quality, 2 balanced, 3 performance, 4 ultra performance
     float sharpness = 0.5f; // 0-1
     std::filesystem::path userDir = "."; // shader and pipeline caches, dumps
-    std::wstring windowTitle = L"ReGPU";
+    std::wstring windowTitle = L"Top Spin 4";
+    std::string profile = "Player";
+    uint32_t language = 1;
     // Upload ring per frame (constants, vertices, textures), in MB; 0 is ReGPU's default (64 with
     // direct fetch). About 11 KB a draw goes to constants alone: titles with thousands of draws need
     // more, or their last draws are dropped. REGPU_RING_MB overrides it.

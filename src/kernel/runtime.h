@@ -1,6 +1,18 @@
 #pragma once
-// Paths from the game's Config (include/regpu/regpu.h).
 #include <filesystem>
-#include "regpu/regpu.h"
 
-inline const std::filesystem::path& RegpuUserDir() { return regpu::GetConfig().userDir; }
+// Starts the runtime services the title expects from the console: the
+// timestamp bundle, the file system roots, the fake GPU and audio clocks.
+void RuntimeInit(const std::filesystem::path& gameDir);
+
+const std::filesystem::path& GameDir();
+const std::filesystem::path& UserDir();
+// The signed-in profile's saves (\Device\Content).
+const std::filesystem::path& ContentDir();
+// Downloadable content shared by every profile (\Device\Dlc; one folder per package).
+const std::filesystem::path& DlcDir();
+
+inline const std::filesystem::path& RegpuUserDir()
+{
+    return UserDir();
+}

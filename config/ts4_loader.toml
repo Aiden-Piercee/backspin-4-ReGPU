@@ -1,0 +1,43 @@
+# XenonRecomp config for Top Spin 4 (54540859) Loader_DLL.xex,
+# sha256 8f9ed530c9cf32cf2ae33534ba1ca99e3abdcf2f5859bc8f68658e23187fd092.
+# Paths are relative to this file. See docs/TS4-RECOMPILE.md.
+[main]
+file_path = "../game/Loader_DLL.xex"
+out_directory_path = "../out/ppc_loader"
+switch_table_file_path = "ts4_loader_switch_tables.toml"
+symbol_prefix = "ldr_"
+
+skip_lr = false
+skip_msr = false
+ctr_as_local = true
+xer_as_local = true
+reserved_as_local = true
+cr_as_local = true
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Register save/restore helpers (tools/xex_config.py --write).
+restgprlr_14_address = 0x833E3180
+savegprlr_14_address = 0x833E3130
+restfpr_14_address = 0x833E39DC
+savefpr_14_address = 0x833E3990
+restvmx_14_address = 0x833E36F8
+savevmx_14_address = 0x833E3460
+restvmx_64_address = 0x833E378C
+savevmx_64_address = 0x833E34F4
+
+# CRT setjmp/longjmp, confirmed in the disassembly: setjmp saves f14-f31, r13-r31,
+# v64+ and CR/LR/r1 at +304/+308/+144; longjmp restores them and unwinds first
+# when +312 is set (same layout as FM4's CRT).
+setjmp_address = 0x8346A940
+longjmp_address = 0x8346A510
+
+functions = [
+]
+
+invalid_instructions = [
+    { data = 0x00000000, size = 4 }, # Padding
+    # BEGIN fm4_config.py exception data
+    { data = 0x83517848, size = 8 }, # handler of 80 functions
+    # END fm4_config.py exception data
+]

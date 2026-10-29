@@ -138,9 +138,27 @@ uint32_t LayoutKey(uint32_t surface)
 }
 std::atomic<uint32_t>& NativeSlot(uint32_t key) { return g_nativeMsaa[(key ^ key >> 12) & 0xFFF]; }
 std::atomic<uint32_t> g_nativeMsaaGeneration{ 0 }; // bumped when an entry changes (BigPassSize's memo)
+// The frame each slot last saw an MSAA layout drawn, and the frame being drawn (set at the swap).
+std::atomic<uint64_t> g_nativeMsaaFrame[0x1000];
+std::atomic<uint64_t> g_layoutFrame{ 0 };
 void SetNativeMsaa(uint32_t key, uint32_t msaa)
 {
-    if (NativeSlot(key).exchange(key << 2 | msaa, std::memory_order_relaxed) != (key << 2 | msaa))
+    std::atomic<uint32_t>& slot = NativeSlot(key);
+    // A 1x view of an MSAA surface's EDRAM within a few frames of its MSAA draws (a full-screen
+    // pass after a tiled 2x scene, downsamples before the next, at the same base and row width)
+    // does not replace its layout: the scene's clears through 4x views, at the start of the next
+    // frame, are mapped by it. A 1x layout maps no views, so taking it over lost both their x scale
+    // and the lower tile's offset (Top Spin 4: half-cleared tiles, the lower one never drawn). A
+    // surface used only at 1x for longer takes the 1x layout as before.
+    static LiveSwitch keep("REGPU_NO_MSAA_LAYOUT_KEEP"); // A/B: the last view's layout wins
+    std::atomic<uint64_t>& msaaFrame = g_nativeMsaaFrame[(key ^ key >> 12) & 0xFFF];
+    const uint64_t frame = g_layoutFrame.load(std::memory_order_relaxed);
+    if (msaa)
+        msaaFrame.store(frame, std::memory_order_relaxed);
+    else if (!keep && slot.load(std::memory_order_relaxed) >> 2 == key && (slot.load(std::memory_order_relaxed) & 3) &&
+             msaaFrame.load(std::memory_order_relaxed) + 8 >= frame)
+        return;
+    if (slot.exchange(key << 2 | msaa, std::memory_order_relaxed) != (key << 2 | msaa))
         g_nativeMsaaGeneration.fetch_add(1, std::memory_order_relaxed);
 }
 // The surface's MSAA layout when the current view is another one of an MSAA surface, else -1.
@@ -197,8 +215,22 @@ float PassScale()
     thread_local Memo memo;
     const uint32_t surface = gpureg::Get(0x2000), color = gpureg::Get(0x2001) & 0xFFF, generation = g_nativeMsaaGeneration.load(std::memory_order_relaxed);
     if (surface != memo.surface || color != memo.color || generation != memo.generation || g_tallInfo != memo.tallInfo || g_tallHeight != memo.tallHeight)
-        memo = { surface, color, generation, g_tallInfo, g_tallHeight,
-            std::min(float(kWidth) / float(PassWidth()), float(kHeight) / float(PassHeight())) };
+    {
+        float scale = std::min(float(kWidth) / float(PassWidth()), float(kHeight) / float(PassHeight()));
+        // REGPU_TALL_NATIVE=1: a tall pass (a 1024x1024 shadow map) at its own resolution, one host
+        // pixel per guest pixel, instead of scaled with the output (an experiment).
+        static LiveSwitch tallNative("REGPU_TALL_NATIVE");
+        if (tallNative && PassHeight() > kHeight && float(OutputHeight()) * g_sceneScale >= float(PassHeight()))
+            scale = float(kHeight) / (float(OutputHeight()) * g_sceneScale);
+        // REGPU_NATIVE_SMALL=1: small render targets (512 pixels wide or less: texture-space maps, lookup
+        // tables) at their own resolution too. A shader that filters such a map by hand works out texel
+        // positions from its guest size (Top Spin 4's faces: frac(uv * 128) over a 128x128 map drawn at
+        // 192x192 gave a fine regular mesh).
+        static LiveSwitch nativeSmall("REGPU_NATIVE_SMALL");
+        if (nativeSmall && (surface & 0x3FFF) <= 512 && PassHeight() <= kHeight)
+            scale = float(kHeight) / (float(OutputHeight()) * g_sceneScale);
+        memo = { surface, color, generation, g_tallInfo, g_tallHeight, scale };
+    }
     return memo.result;
 }
 float ScaleY() { return float(OutputHeight()) / float(kHeight) * g_sceneScale * PassScale(); }
@@ -448,6 +480,11 @@ struct Renderer
 };
 
 Renderer g_r;
+std::atomic<uint32_t> g_lastFrameDraws{ 0 }; // the debug server's status
+}
+uint32_t RendererLastFrameDraws() { return g_lastFrameDraws.load(std::memory_order_relaxed); }
+namespace
+{
 
 // Shared caches used by draws on several threads (see DrawContext).
 std::recursive_mutex g_shaderMutex;  // shaders, pipelines, the compiler's maps
@@ -1087,6 +1124,7 @@ void Init()
     InitPipelineLibrary(d);
     // Guest physical memory for the GPU, in place: vertex fetches read it
     // without copies.
+#if defined(__ID3D12Device13_INTERFACE_DEFINED__)
     ComPtr<ID3D12Device13> d13;
     HRESULT hr = d->QueryInterface(IID_PPV_ARGS(&d13));
     if (SUCCEEDED(hr))
@@ -1096,8 +1134,11 @@ void Init()
         Log("renderer: OpenExistingHeapFromFileMapping failed %08X; trying the view address", unsigned(hr));
         hr = d13->OpenExistingHeapFromAddress1(GuestPtr(0xA0000000), 0x20000000, IID_PPV_ARGS(&g_r.physicalHeap));
     }
+#else
+    HRESULT hr = E_NOINTERFACE;
+#endif
     if (FAILED(hr))
-        Log("renderer: mapping guest memory: %s failed %08X", d13 ? "OpenExistingHeapFromAddress1" : "ID3D12Device13", unsigned(hr));
+        Log("renderer: mapping guest memory: ID3D12Device13 unavailable or failed %08X", unsigned(hr));
     else
     {
         D3D12_RESOURCE_DESC bd{};
@@ -1198,6 +1239,14 @@ Renderer::Surface& GetSurface(bool depth, uint32_t base)
         dsvDesc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
         dsvDesc.ViewDimension = g_msaa > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
         C().list->CreateDepthStencilView(g_r.device, s.resource.Get(), dsvDesc, s.view); // in order with the recorded commands
+        // A depth surface the title tests against before anything writes it reads, on the console,
+        // whatever EDRAM held there: mostly a colour target with opaque alpha, which as depth is
+        // about 1.0. A new host resource reads 0 instead, and a less-or-equal pass against it never
+        // drew (Top Spin 4's bloom downsample into a 640x360 view whose depth it never clears: the
+        // composite then added a 2x blow-up of the scene's corner, posters ghosting over the
+        // players). New depth surfaces start at the far plane. REGPU_NO_DEPTH_INIT_FAR=1: unset.
+        if (static LiveSwitch noFar("REGPU_NO_DEPTH_INIT_FAR"); !noFar)
+            C().list->ClearDepthStencilView(s.view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
     }
     else
     {
@@ -2123,6 +2172,7 @@ const CompiledShader& GetShaderLocked(uint64_t hash, const std::vector<uint32_t>
                 cs.info.ok = true;
                 cs.info.usedTextureSlots = base.info.usedTextureSlots;
                 cs.info.constantsUsed = base.info.constantsUsed; // same ALU code
+                cs.info.interpolatorsWritten = base.info.interpolatorsWritten;
                 cs.info.vertexFetchLayout = std::move(layout.vertexFetchLayout);
                 cs.info.vertexFetchConstants = std::move(layout.vertexFetchConstants);
                 cs.cacheKey = base.cacheKey;
@@ -3598,7 +3648,13 @@ bool BuildIndexList(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize, std:
         {
             const uint32_t pos = uint32_t(out.size());
             out.insert(out.end(), { g[i], g[i + 1], g[i + 2] });
-            for (uint32_t role : { 1u, 2u, 0u })
+            // The Xenos draws each rectangle as one primitive with the given triangle's facing. The second
+            // triangle is ordered (first hypotenuse end, fourth corner, second end), which keeps that
+            // winding: the other order faced the other way, so a draw with separate back-face stencil ops
+            // applied them to half of every rectangle. From the FM4 port. REGPU_OLD_RECT_WINDING=1 (read
+            // at start): the old order (A/B).
+            static const bool oldWinding = getenv("REGPU_OLD_RECT_WINDING") != nullptr;
+            for (uint32_t role : oldWinding ? std::initializer_list<uint32_t>{ 1u, 2u, 0u } : std::initializer_list<uint32_t>{ 1u, 0u, 2u })
                 out.push_back(0x80000000u | (role << 29) | pos);
         }
         return true;
@@ -3659,6 +3715,7 @@ struct TileState
     uint32_t surface = ~0u; // RB_SURFACE_INFO of the tiled pass (~0: any)
 };
 thread_local TileState g_tile;
+thread_local bool g_tileResolved = false; // a resolve just ended a tile (RendererTileAfterResolve)
 static LiveSwitch g_noForeignTile("REGPU_NO_FOREIGN_TILE"); // A/B for the paint-editor tile fix
 
 // Tiling: each tile pass is shifted into EDRAM by the window offset and
@@ -3798,6 +3855,10 @@ void BlitResolve(bool depth, uint32_t base, uint32_t width, uint32_t height, DXG
     dest.frame = g_r.frame;
     const D3D12_RECT sr{ rect.left, rect.top, std::min<LONG>(rect.right, width), std::min<LONG>(rect.bottom, height) };
     FrameResources& f = Frame();
+    static LiveSwitch traceBlits("REGPU_TRACE_RESOLVES");
+    if (traceBlits)
+        Log("resolve blit: %08X %ux%u (texture %ux%u host %ux%u) rect %ld,%ld-%ld,%ld descriptors %u/%u", base, width, height, dest.width, dest.height,
+            dest.hostWidth, dest.hostHeight, sr.left, sr.top, sr.right, sr.bottom, f.descriptorsUsed, kDescriptorsPerFrame);
     if (sr.right <= sr.left || sr.bottom <= sr.top || f.descriptorsUsed >= kDescriptorsPerFrame)
         return;
 
@@ -4582,6 +4643,26 @@ void Resolve()
         else if (request.mode == regpu::Writeback::Mode::Deferred && (depth || destFormat == 6))
             QueueDeferredWriteback(base, width, height, info, depth, rect, request);
     }
+    // A tile's colour resolve ends it: the next tile starts at its bottom row. The next tile's
+    // first draws can be its clears, rectangles in tile-relative coordinates drawn before any
+    // draw sets the tile's window scissor (Top Spin 4 clears through a 4x view), so they land
+    // there; after the last tile nothing is tile-relative.
+    {
+        static LiveSwitch noNextTile("REGPU_NO_NEXT_TILE"); // A/B
+        const uint32_t pitch = gpureg::Get(RB_SURFACE_INFO) & 0x3FFF;
+        if (!noNextTile && sourceSelect < 4 && pitch >= kWidth && rect.left == 0 && rect.right >= LONG(kWidth) &&
+            (tile.top > 0 || tile.bottom < LONG(PassHeight())) && rect.bottom == tile.bottom)
+        {
+            if (rect.bottom < LONG(PassHeight()))
+            {
+                g_tile.originY = rect.bottom;
+                g_tile.rect = { tile.left, rect.bottom, tile.right, LONG(PassHeight()) };
+            }
+            else
+                g_tile = TileState{};
+            g_tileResolved = true;
+        }
+    }
     // Clears after a tile's resolve prepare the EDRAM for the next tile, which
     // we draw lower on the same host surface: a full-width clear covers every
     // row from the tile down.
@@ -4719,6 +4800,8 @@ void DrainScan(double budgetMs, std::vector<const CompiledShader*>* queued = nul
             return;
         for (ScannedShader& s : found)
         {
+            if (!ucode::Plausible(ucode::Parse(s.code.data(), uint32_t(s.code.size()), s.pixel)))
+                continue;
             const uint64_t hash = Fnv(s.code.data(), s.code.size() * 4) ^ (s.pixel ? 1 : 0);
             g_scanKnown.insert(hash);
             // Speculative (and partly stale memory): compiled when nothing urgent waits,
@@ -5239,6 +5322,8 @@ void RendererPredictBegin()
 void RendererPredictShader(uint32_t type, const uint32_t* microcodeBE, uint32_t dwords)
 {
     dwords = ucode::UsedDwords(microcodeBE, dwords);
+    if (!dwords || !ucode::Plausible(ucode::Parse(microcodeBE, dwords, type != 0)))
+        return;
     const uint64_t hash = Fnv(microcodeBE, dwords * 4) ^ type;
     if (type == 0)
     {
@@ -5754,6 +5839,18 @@ void RendererTrackTile(RendererTile& tile)
     }
 }
 
+void RendererTileAfterResolve(RendererTile& tile)
+{
+    if (!g_tileResolved)
+        return;
+    g_tileResolved = false;
+    tile.originY = g_tile.originY;
+    tile.rect[0] = g_tile.rect.left;
+    tile.rect[1] = g_tile.rect.top;
+    tile.rect[2] = g_tile.rect.right;
+    tile.rect[3] = g_tile.rect.bottom;
+}
+
 void RendererSetTile(const RendererTile& tile)
 {
     g_tile.originY = tile.originY;
@@ -5868,6 +5965,18 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     static LiveSwitch noRender("REGPU_NO_RENDER");
     if (noRender)
         return;
+    // A draw with PA_SC_VIZ_QUERY.kill_pix_post_hi_z (bit 7) is viz query survey geometry: it only feeds
+    // the hierarchical-Z visibility test of its query ID, and the hardware kills its pixels after hi-Z,
+    // so it writes no colour, depth or stencil and no ZPD report counts it. Nothing here predicates
+    // draws on viz queries, so a survey has nothing to feed and isn't drawn (titles may draw them with
+    // debug shaders: solid boxes). From the FM4 port. REGPU_VIZ_QUERY_DRAWS=1 draws them (A/B).
+    static LiveSwitch vizQueryDraws("REGPU_VIZ_QUERY_DRAWS");
+    if (!vizQueryDraws && (gpureg::Get(0x2293 /* PA_SC_VIZ_QUERY */) >> 7 & 1))
+    {
+        TraceSkip("viz query survey", initiator);
+        g_r.skippedThisFrame++;
+        return;
+    }
     if (!g_r.ok)
         Init();
     const uint32_t edramMode = gpureg::Get(RB_MODECONTROL) & 7;
@@ -6084,6 +6193,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         uint32_t vte[4];
         uint32_t vfl[32][4]; // vertex fetch layout of the bound shader
         float vuser[4][4];   // the game's per-draw constants (Host::onDraw; hlsl.cpp vuser), zero by default
+        float vbias[4];      // x: depth bias (polygon offset)
         float vwide[4];      // x: Hor+ factor (see hlsl.cpp)
         float vjitter[4];     // motion-vector variants: this frame's jitter (NDC)
     };
@@ -6249,7 +6359,12 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         const uint32_t surface = gpureg::Get(RB_SURFACE_INFO), msaa = (surface >> 16) & 3;
         if ((initiator & 0x3F) != 8 || ps.info.usedTextureSlots || vs.info.usedTextureSlots)
         {
-            SetNativeMsaa(LayoutKey(surface), msaa);
+            // Not from a draw into a few pixels (occlusion queries: Top Spin 4 draws points into
+            // 16x16 through a 4x view of its 2x scene, which made the scene's clears look native).
+            static LiveSwitch noTinySkip("REGPU_NO_TINY_LAYOUT_SKIP"); // A/B
+            const D3D12_RECT s = WindowScissor();
+            if (noTinySkip || (s.right - s.left) * (s.bottom - s.top) > 64 * 64)
+                SetNativeMsaa(LayoutKey(surface), msaa);
         }
         else if (TallView())
         {
@@ -6262,12 +6377,36 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
             vc->vscale[3] = float(MsaaAcross(msaa)) / float(MsaaAcross(uint32_t(native)));
             vc->voffset[3] = float(MsaaDown(msaa)) / float(MsaaDown(uint32_t(native)));
         }
+        // An MSAA view of a surface drawn at 1x (its layout is 1x): each of the view's pixels is 2x1 or
+        // 2x2 pixels of it, so its rectangles scale up the same way. Top Spin 4 clears its 128x128 face
+        // lighting maps through a 4x view; unscaled, three quarters of the map kept stale texels, and
+        // the faces' texel-border filtering drew them as a fine mesh. REGPU_NO_MSAA_VIEW_ON_1X=1: unscaled.
+        else if (static LiveSwitch noView1x("REGPU_NO_MSAA_VIEW_ON_1X"); !noView1x && msaa != 0)
+        {
+            const uint32_t key = LayoutKey(surface), native = NativeSlot(key).load(std::memory_order_relaxed);
+            if (native >> 2 == key && (native & 3) == 0)
+            {
+                vc->vscale[3] = float(MsaaAcross(msaa));
+                vc->voffset[3] = float(MsaaDown(msaa));
+            }
+        }
     }
     vc->voffset[0] = RegFloat(PA_CL_VPORT_XOFFSET);
     vc->voffset[1] = RegFloat(PA_CL_VPORT_YOFFSET);
     vc->voffset[2] = RegFloat(PA_CL_VPORT_ZOFFSET);
     vc->vte[0] = gpureg::Get(PA_CL_VTE_CNTL);
     vc->vte[1] = vc->vte[2] = vc->vte[3] = 0;
+    // Flags for the screen-space position code (hlsl.cpp), in bits the register doesn't use:
+    // bit 31 REGPU_OLD_CLEAR_SHIFT (A/B: half-pixel shift before the MSAA-view scale); bit 30 snaps a
+    // texture-less screen-space draw's edges to whole guest pixels on an upscaled surface. The console
+    // covers a guest pixel by its centre; scaled, the half-pixel shift is more than half a host pixel,
+    // and a rectangle with integer edges (a shadow map's clear) lost its first row and column.
+    // REGPU_NO_RECT_SNAP=1: no snap.
+    static LiveSwitch oldClearShift("REGPU_OLD_CLEAR_SHIFT"), noRectSnap("REGPU_NO_RECT_SNAP");
+    if (oldClearShift)
+        vc->vte[0] |= 1u << 31;
+    if (!noRectSnap && !ps.info.usedTextureSlots && !vs.info.usedTextureSlots && (ScaleX() != 1.0f || ScaleY() != 1.0f))
+        vc->vte[0] |= 1u << 30;
     // Triangle lists and restart-free strips from an index buffer: a real indexed draw.
     static LiveSwitch noIndexed("REGPU_NO_INDEXED");
     D3D12_INDEX_BUFFER_VIEW indexView{};
@@ -6312,10 +6451,15 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     pc->info[1] = (gpureg::Get(SQ_PROGRAM_CNTL) >> 18) & 1 ? (gpureg::Get(SQ_CONTEXT_MISC) >> 8) & 0xFF : 0xFF;
 
     const uint32_t colorControl = gpureg::Get(RB_COLORCONTROL);
-    // Depth-only passes (EDRAM mode 5) keep the alpha test: a shadow map can have
-    // cut-out geometry that otherwise lands in it as solid blocks (jagged shadow under the
-    // object). REGPU_NO_DEPTH_ALPHATEST=1 skips it.
-    static const bool depthAlphaTest = getenv("REGPU_NO_DEPTH_ALPHATEST") == nullptr;
+    // Depth-only passes (EDRAM mode 5) keep the alpha test for draws that sample a texture: a
+    // shadow map can have cut-out geometry that otherwise lands in it as solid blocks (jagged
+    // shadow under the object). A texture-less draw has no cut-out to make: Top Spin 4 clears its
+    // shadow map's depth with a quad whose colour, and so alpha, is 0, and the console writes it
+    // (alpha-tested, the clear was lost and the stale depth shadowed the map's whole square).
+    // REGPU_NO_DEPTH_ALPHATEST=1: no alpha test in depth-only passes; REGPU_DEPTH_ALPHATEST_ALL=1:
+    // texture-less draws tested too (before).
+    static LiveSwitch noDepthAlphaTest("REGPU_NO_DEPTH_ALPHATEST"), testAll("REGPU_DEPTH_ALPHATEST_ALL");
+    const bool depthAlphaTest = !noDepthAlphaTest && (testAll || ps.info.usedTextureSlots || vs.info.usedTextureSlots);
     pc->info[0] = (colorControl >> 3) & 1 && (edramMode != 5 || depthAlphaTest) ? (colorControl & 7) : 7;
     pc->info2[0] = RegFloat(RB_ALPHA_REF);
     pc->info2[1] = 1.0f / ScaleX();
@@ -6323,8 +6467,14 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
     // Our colour target is half float: a 7e3 surface (formats 3 and 12, the title's HDR scene)
     // saturates at 31.875, so its output is clamped to that, as the hardware does (the bloom
     // reads those values).
+    // A fixed-point surface (k_8_8_8_8, its _GAMMA, k_2_10_10_10, 0 1 2 10) takes the output clamped
+    // to 0..1 before blending (-1: saturate). Unclamped, a multiply blend brightened where the output
+    // was a little over 1 (Top Spin 4's contact-shadow decals: light squares under every foot).
+    // REGPU_NO_UNORM_CLAMP=1: not clamped.
+    static LiveSwitch noUnormClamp("REGPU_NO_UNORM_CLAMP");
     const uint32_t colorFormat = (gpureg::Get(RB_COLOR_INFO) >> 16) & 0xF;
-    pc->info2[3] = colorFormat == 3 || colorFormat == 12 ? 31.875f : 0.0f;
+    const bool unorm = colorFormat == 0 || colorFormat == 1 || colorFormat == 2 || colorFormat == 10;
+    pc->info2[3] = colorFormat == 3 || colorFormat == 12 ? 31.875f : unorm && !noUnormClamp ? -1.0f : 0.0f;
 
     Section(4);
     // Textures are bindless: each one has a permanent descriptor in the heap's
@@ -6379,6 +6529,19 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         // Debug: REGPU_NO_LIVE_CUBE=1 binds the fallback for cubes the title rendered (live reflections).
         if (static LiveSwitch noLiveCube("REGPU_NO_LIVE_CUBE"); noLiveCube && cube && ResolvedFor(fetch))
             texture = nullptr;
+        // Debug: REGPU_WHITE_TEXTURE=<hex physical address>[,<address>...] binds the white fallback for those textures.
+        static const std::vector<uint32_t> whiteAddresses = [] {
+            std::vector<uint32_t> v;
+            for (const char* s = getenv("REGPU_WHITE_TEXTURE"); s && *s;)
+            {
+                char* end = nullptr;
+                v.push_back(uint32_t(strtoul(s, &end, 16)) & 0xFFFFF000);
+                s = *end == ',' ? end + 1 : end + strlen(end);
+            }
+            return v;
+        }();
+        if (!cube && std::find(whiteAddresses.begin(), whiteAddresses.end(), fetch.Address()) != whiteAddresses.end())
+            texture = nullptr;
         const uint32_t index = texture ? BindlessIndex(texture, format, cube) : (cube ? 1u : 0u);
         if (RendererTracing())
             CaptureTexture(fetch, slot, cube, texture != nullptr, index, native, g_textureFailure);
@@ -6408,10 +6571,47 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         pc->tinfo[slot][0] = (point ? (clamp ? 2 : 3) : (clamp ? 1 : 0)) | ((uint32_t(fetch.ExpAdjust()) & 0x3F) << 8);
         if (!clamp && !oldClamp)
             pc->tinfo[slot][0] |= (clampX ? 1u << 18 : 0u) | (clampY ? 1u << 19 : 0u);
+        // Point sampling: REGPU_POINT_NUDGE=1 / REGPU_POINT_NUDGE_NEG=1 move the coordinate a hundredth
+        // of a texel forwards / back (an experiment for a regular mesh on faces; hlsl.cpp TFetchRaw).
+        if (point)
+        {
+            static LiveSwitch nudge("REGPU_POINT_NUDGE"), nudgeBack("REGPU_POINT_NUDGE_NEG");
+            pc->tinfo[slot][0] |= (nudge ? 1u << 4 : 0u) | (nudgeBack ? 1u << 5 : 0u);
+        }
+        // Normal maps (DXN 49, CTX1 60): REGPU_FLAT_NORMALS=1 reads them flat, REGPU_DXN_SWAP=1
+        // exchanges x and y (experiments for a grid on faces; hlsl.cpp TFetch).
+        if (fetch.Format() == 49 || fetch.Format() == 60)
+        {
+            static LiveSwitch flatNormals("REGPU_FLAT_NORMALS"), swapXY("REGPU_DXN_SWAP");
+            pc->tinfo[slot][0] |= (flatNormals ? 1u << 2 : 0u) | (swapXY ? 1u << 3 : 0u);
+        }
         // Clamp to border on both axes (modes 6, 7): the shader returns the border colour
         // outside the image (dword 5 bits 0-1: 1 white, else black).
         if (clampX >= 6 && clampY >= 6)
             pc->tinfo[slot][0] |= (1u << 16) | ((fetch.dwords[5] & 3) == 1 ? 1u << 17 : 0u);
+        // Depth fetched as a texture (k_24_8 22, k_24_8_FLOAT 23: shadow maps), marked (bit 24) for
+        // the shadow experiments: DIAG switches show what the receivers do with the map, FIX
+        // switches try a reading of it (hlsl.cpp TFetch).
+        if (fetch.Format() == 22 || fetch.Format() == 23)
+        {
+            static LiveSwitch lit("REGPU_DIAG_SHADOW_LIT"), dark("REGPU_DIAG_SHADOW_DARK"), border("REGPU_FIX_SHADOW_BORDER"),
+                as20e4("REGPU_FIX_SHADOW_AS_20E4"), from20e4("REGPU_FIX_SHADOW_FROM_20E4"), litX("REGPU_DIAG_SHADOW_LIT_X");
+            pc->tinfo[slot][0] |= 1u << 24;
+            if (static LiveSwitch point("REGPU_SHADOW_POINT"); point) // point sampling, clamped (no filtering across texels)
+                pc->tinfo[slot][0] = (pc->tinfo[slot][0] & ~3u) | 2u;
+            if (lit) // every lookup reads the far plane (nothing in front: lit, if the receiver compares as usual)
+                pc->tinfo[slot][0] |= 1u << 20;
+            if (dark) // every lookup reads the near plane (everything in front: shadowed)
+                pc->tinfo[slot][0] |= 1u << 21;
+            if (litX) // as LIT, the depth (x) only: does the receiver use the other channels?
+                pc->tinfo[slot][0] |= 1u << 25;
+            if (as20e4) // the copy's float depth handed over as the bits of a 20e4 depth (unorm view of D24FS8)
+                pc->tinfo[slot][0] |= 1u << 22;
+            if (from20e4) // the copy's depth taken as the bits of a 20e4 depth and decoded
+                pc->tinfo[slot][0] |= 1u << 23;
+            if (border) // outside the map: white (far, lit) instead of the edge texels
+                pc->tinfo[slot][0] |= (1u << 16) | (1u << 17);
+        }
         pc->tbias[slot][0] = fetch.LodBias();
         memcpy(&pc->tbias[slot][1], &index, 4);
         // A resolved texture is as wide as the pitch it was resolved with; the fetch
@@ -6432,6 +6632,67 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         memcpy(memo.tbias, pc->tbias[slot], sizeof(memo.tbias));
         memo.samplesResolve = g_drawSamplesResolve;
         g_drawSamplesResolve |= samplesBefore;
+    }
+    // Draws that sample a depth texture (shadow receivers): REGPU_DIAG_SHADOW_TINT paints them red,
+    // REGPU_DIAG_SHADOW_SHOW shows the map value they read (hlsl.cpp).
+    pc->info[2] = 0;
+    {
+        static LiveSwitch tint("REGPU_DIAG_SHADOW_TINT"), show("REGPU_DIAG_SHADOW_SHOW");
+        bool depthFetch = false;
+        for (uint32_t m = usedSlots; m; m &= m - 1)
+            depthFetch |= (pc->tinfo[__builtin_ctz(m)][0] >> 24) & 1;
+        if (depthFetch)
+            pc->info[2] = (tint ? 1u : 0u) | (show ? 2u : 0u);
+    }
+    // A vertex shader that allocates interpolators but exports none (depth-only shaders end with an
+    // empty export) leaves the pixel shader's inputs to whatever the hardware's parameter cache
+    // held: titles rely on cut-out kills there passing (Top Spin 4's player shadows: a texture
+    // looked up at the unwritten coordinate, read as 0 here, cut whole bodies out of the shadow map).
+    // In depth-only passes such kills are skipped (bit 2). REGPU_NO_KILL_SKIP=1: kept.
+    if (static LiveSwitch noKillSkip("REGPU_NO_KILL_SKIP"); !noKillSkip && edramMode == 5 && !vs.info.interpolatorsWritten)
+        pc->info[2] |= 4u;
+    // Experiments for speckled lighting on players (hlsl.cpp): REGPU_PS_SANITIZE=1 outputs 0 for
+    // NaN/Inf (bit 3), REGPU_SAFE_SQRT=1 keeps sqrt/rsqrt inputs positive (bit 4).
+    {
+        static LiveSwitch sanitize("REGPU_PS_SANITIZE"), safeSqrt("REGPU_SAFE_SQRT");
+        pc->info[2] |= (sanitize ? 8u : 0u) | (safeSqrt ? 16u : 0u);
+    }
+    // Polygon offset (PA_SU_SC_MODE_CNTL bits 11-13, PA_SU_POLY_OFFSET_FRONT/BACK_SCALE/OFFSET
+    // 0x2380-0x2383): not translated so far. REGPU_POLY_OFFSET=1 applies the constant offset, in
+    // units of 2^-24 of the depth range, after the viewport transform (an experiment: speckled
+    // self-shadowing on players). Each new value is logged.
+    vc->vbias[0] = vc->vbias[1] = vc->vbias[2] = vc->vbias[3] = 0;
+    if (const uint32_t mode = gpureg::Get(PA_SU_SC_MODE_CNTL); mode & (7u << 11))
+    {
+        const float scale = RegFloat(0x2380), offset = RegFloat(0x2381);
+        static std::mutex m;
+        static std::set<std::pair<uint32_t, uint32_t>> seen;
+        {
+            std::lock_guard lock(m);
+            if (seen.size() < 64 && seen.emplace(gpureg::Get(0x2380), gpureg::Get(0x2381)).second)
+                Log("renderer: polygon offset (mode %X) front scale %g offset %g, back scale %g offset %g, edram mode %u", (mode >> 11) & 7,
+                    scale, offset, RegFloat(0x2382), RegFloat(0x2383), edramMode);
+        }
+        if (static LiveSwitch polyOffset("REGPU_POLY_OFFSET"); polyOffset)
+            vc->vbias[0] = offset / 16777216.0f;
+    }
+    // Colour draws whose vertex shader allocates interpolators (SQ_PROGRAM_CNTL bits 20-23: count - 1)
+    // it never writes: logged once per shader pair. REGPU_UNWRITTEN_FILL=1 starts unwritten
+    // interpolators at 0.5 instead of 0 (vte.x bit 29, hlsl.cpp; an experiment).
+    if (edramMode == 4)
+    {
+        const uint32_t allocated = (2u << ((gpureg::Get(SQ_PROGRAM_CNTL) >> 20) & 0xF)) - 1, unwritten = allocated & ~vs.info.interpolatorsWritten;
+        if (unwritten)
+        {
+            static std::mutex m;
+            static std::set<std::pair<uint64_t, uint64_t>> seen;
+            std::lock_guard lock(m);
+            if (seen.emplace(C().vsHash, C().psHash).second)
+                Log("renderer: vs %016llx writes interpolators %04X of %04X allocated (ps %016llx reads the rest unwritten)",
+                    (unsigned long long)C().vsHash, vs.info.interpolatorsWritten, allocated, (unsigned long long)C().psHash);
+        }
+        if (static LiveSwitch fill("REGPU_UNWRITTEN_FILL"); fill && unwritten)
+            vc->vte[0] |= 1u << 29;
     }
     // HUD and menus sample ordinary textures; full-screen layers sample resolved targets
     // and must keep spanning the width (squeezing them warped the image outside 16:9).
@@ -6460,14 +6721,28 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         // the 4x scene's three tiles, and clipped to the last tile it covered only the bottom
         // third (the rest of the picture was black).
         // Another MSAA view of the tiled surface itself (stencil clears of a composite) is still
-        // tile-relative.
-        else if (g_tile.originY != 0 && (g_tile.surface == ~0u || g_tile.surface == gpureg::Get(RB_SURFACE_INFO) || (!g_noForeignTile && ForeignNativeMsaa() >= 0)))
+        // tile-relative, for its texture-less rectangles (clears): a full-screen 1x pass over the
+        // same EDRAM after the tiles is not.
+        else if (g_tile.originY != 0 &&
+                 (g_tile.surface == ~0u || g_tile.surface == gpureg::Get(RB_SURFACE_INFO) ||
+                     (!g_noForeignTile && (initiator & 0x3F) == 8 && !ps.info.usedTextureSlots && !vs.info.usedTextureSlots && ForeignNativeMsaa() >= 0)))
         {
             shiftY = float(g_tile.originY + wy);
             scissor.left = std::max(scissor.left, g_tile.rect.left);
             scissor.top = std::max(scissor.top, g_tile.rect.top);
             scissor.right = std::min(scissor.right, g_tile.rect.right);
             scissor.bottom = std::min(scissor.bottom, g_tile.rect.bottom);
+        }
+    }
+    if ((initiator & 0x3F) == 8 && !ps.info.usedTextureSlots && !vs.info.usedTextureSlots)
+    {
+        static LiveSwitch traceRects("REGPU_TRACE_CLEARS");
+        if (traceRects)
+        {
+            const uint32_t surface = gpureg::Get(RB_SURFACE_INFO);
+            Log("rect draw: surface %08X colour %03X layout %08X (frame %llu) scale %g,%g shift %g scissor %ld,%ld-%ld,%ld tile origin %d",
+                surface, gpureg::Get(RB_COLOR_INFO) & 0xFFF, NativeSlot(LayoutKey(surface)).load(), (unsigned long long)g_layoutFrame.load(),
+                vc->vscale[3], vc->voffset[3], shiftY, scissor.left, scissor.top, scissor.right, scissor.bottom, g_tile.originY);
         }
     }
     const D3D12_VIEWPORT vp{ 0, shiftY * ScaleY(), float(PassWidth()) * ScaleX(), float(PassHeight()) * ScaleY(), 0, 1 };
@@ -6586,6 +6861,9 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
             (unsigned long long)C().vsHash, (unsigned long long)C().psHash, initiator & 0x3F, list.size(), gpureg::Get(RB_BLENDCONTROL0),
             gpureg::Get(RB_COLOR_MASK) & 15, scissor.left, scissor.top, scissor.right, scissor.bottom, gpureg::Get(PA_CL_VTE_CNTL) & 0x3FF,
             int(WidePass()), int(g_drawSamplesResolve), gpureg::Get(RB_SURFACE_INFO) & 0x3FFF, tex.c_str());
+        Log("    host: scissor %ld,%ld-%ld,%ld viewport %g,%g %gx%g depth %p colour %p (bases %03X %03X)", hostScissor.left, hostScissor.top,
+            hostScissor.right, hostScissor.bottom, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, static_cast<void*>(C().depth.Get()),
+            static_cast<void*>(C().color.Get()), C().depthBase, C().colorBase);
         uint32_t bools[8];
         for (int i = 0; i < 8; i++)
             bools[i] = gpureg::Get(gpureg::BoolConstants + i);
@@ -6698,6 +6976,53 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             if (ms > 1.0)
                 Log("perf: DrawInstanced took %.1f ms (vs %016llx ps %016llx)", ms, (unsigned long long)C().vsHash, (unsigned long long)C().psHash);
+        }
+    }
+    // EDRAM is one memory: a depth/stencil clear rectangle at the base the colour target also
+    // starts at leaves its packed words (depth in bits 8-31, stencil in 0-7) for the colour view to
+    // read, as 8:8:8:8 with red in bits 0-7. Titles clear a colour target that way through a
+    // depth-only MSAA view (Top Spin 4 clears its 1024x1024 shadow colour layer to white with a
+    // depth of 1/256). The host keeps colour and depth apart, so the clear is mirrored into the
+    // colour target over the rectangle. REGPU_NO_EDRAM_ALIAS_CLEAR=1: off.
+    if (static LiveSwitch noAliasClear("REGPU_NO_EDRAM_ALIAS_CLEAR"); !noAliasClear && (initiator & 0x3F) == 8 && edramMode == 5 && C().color &&
+        !ps.info.usedTextureSlots && !vs.info.usedTextureSlots && !vs.info.vertexFetchConstants.empty())
+    {
+        const uint32_t colorInfo = gpureg::Get(RB_COLOR_INFO), depthInfo = gpureg::Get(RB_DEPTH_INFO), depthControl = gpureg::Get(RB_DEPTHCONTROL);
+        const uint32_t stencilRefMask = gpureg::Get(RB_STENCILREFMASK);
+        const bool depthWrite = (depthControl >> 2) & 1, stencilWrite = (depthControl & 1) && ((stencilRefMask >> 16) & 0xFF);
+        const uint32_t colorFormat = (colorInfo >> 16) & 0xF;
+        // Screen-space rectangles (no viewport transform: the vertex z is the depth written) over
+        // an 8:8:8:8 colour target at the same EDRAM base.
+        if ((colorInfo & 0xFFF) == (depthInfo & 0xFFF) && (depthWrite || stencilWrite) && (colorFormat == 0 || colorFormat == 1) &&
+            (gpureg::Get(PA_CL_VTE_CNTL) & 0x3F) == 0)
+        {
+            const uint32_t k = vs.info.vertexFetchConstants[0];
+            const uint32_t d0 = gpureg::Get(gpureg::FetchConstants + k * 2), d1 = gpureg::Get(gpureg::FetchConstants + k * 2 + 1);
+            const uint32_t dwords = (d1 >> 2) & 0xFFFFFF;
+            if (dwords >= 3 * 7)
+            {
+                const uint32_t* v = GuestPtr<uint32_t>(GpuPhysToGuest(d0 & 0xFFFFFFFC));
+                auto f = [&](uint32_t i) { const uint32_t b = __builtin_bswap32(v[i]); float x; memcpy(&x, &b, 4); return x; };
+                // The three corners (x, y, z at the start of each 7-dword vertex), scaled like the
+                // draw itself when it is an MSAA view of the colour layout (vscale.w, voffset.w).
+                const float sx = vc->vscale[3] > 0 ? vc->vscale[3] : 1.0f, sy = vc->voffset[3] > 0 ? vc->voffset[3] : 1.0f;
+                const float x0 = std::min({ f(0), f(7), f(14) }) * sx, x1 = std::max({ f(0), f(7), f(14) }) * sx;
+                const float y0 = std::min({ f(1), f(8), f(15) }) * sy, y1 = std::max({ f(1), f(8), f(15) }) * sy;
+                D3D12_RECT r{ std::max<LONG>(LONG(x0), scissor.left), std::max<LONG>(LONG(y0), scissor.top), std::min<LONG>(LONG(x1), scissor.right),
+                    std::min<LONG>(LONG(y1), scissor.bottom) };
+                if (r.right > r.left && r.bottom > r.top)
+                {
+                    const float z = std::clamp(f(2), 0.0f, 1.0f);
+                    const uint32_t depthBits = ((depthInfo >> 16) & 1) ? EncodeDepth20e4(z) : uint32_t(std::lround(double(z) * 16777215.0));
+                    const uint32_t word = depthBits << 8 | (stencilWrite ? stencilRefMask & (stencilRefMask >> 16) & 0xFF : 0);
+                    const float color[4] = { float(word & 0xFF) / 255.0f, float((word >> 8) & 0xFF) / 255.0f, float((word >> 16) & 0xFF) / 255.0f,
+                        float(word >> 24) / 255.0f };
+                    const D3D12_RECT host = ToHost(r);
+                    C().list->ClearRenderTargetView(C().rtv, color, 1, &host);
+                    if (TraceFrame() && g_r.frame + 1 == TraceFrame())
+                        Log("    depth clear mirrored into colour: %ld,%ld-%ld,%ld word %08X", r.left, r.top, r.right, r.bottom, word);
+                }
+            }
         }
     }
     Section(6);
@@ -7036,6 +7361,8 @@ void PrecompileAll()
         BootPresent(bootFrame);
     for (const regpu::ScannedShader& s : host.staticShaders())
     {
+        if (!ucode::Plausible(ucode::Parse(s.code.data(), uint32_t(s.code.size()), s.pixel)))
+            continue;
         const uint64_t hash = Fnv(s.code.data(), s.code.size() * 4) ^ (s.pixel ? 1 : 0);
         if (g_r.shaders.count(hash))
             continue;
@@ -7095,6 +7422,9 @@ void PrecompileAll()
     Log("static shaders: %zu compiled in %.1f s (%zu found in memory meanwhile)", compiling.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - compileStart).count(), compiling.size() - size_t(toCompile));
 }
 
+void GpuSetFreeze(bool on); // gpu.cpp: F9
+bool GpuFreezeWanted();
+
 void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
 {
     if (regpu::GetHost().onSwap)
@@ -7106,7 +7436,6 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
     BeginFrameIfNeeded();
     // A frame that rendered small but never resolved a scene (a menu): upscale what it shows
     // and stay at full size for a while (menus are drawn sharp at full size).
-    if (g_scenePhase && !g_upscale.switchedThisFrame)
     {
         UpscaleResolved(frontBuffer);
         g_sceneScale = 1.0f;
@@ -7168,6 +7497,12 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
             Log("capture: F12 pressed, tracing frame %llu", (unsigned long long)dumpFrame);
         }
         wasDown = down;
+        // F9: freeze the picture (gpu.cpp GpuSetFreeze) for live shader edits; F9 again resumes.
+        static bool f9WasDown = false;
+        const bool f9Down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        if (f9Down && !f9WasDown && pid == GetCurrentProcessId())
+            GpuSetFreeze(!GpuFreezeWanted());
+        f9WasDown = f9Down;
     }
     // REGPU_CAPTURE_TALL=1: the same capture as F12, once a pass taller than the screen was drawn.
     {
@@ -7194,6 +7529,7 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
         }
     }
     ++g_r.frame;
+    g_layoutFrame.store(g_r.frame, std::memory_order_relaxed);
     DebugOnSwap(g_r.frame);
     if (int st = g_drawStats.load(); st) // drawstats: arm at one swap, stop at the next
         g_drawStats = st == 1 ? 2 : 0;
@@ -7326,6 +7662,16 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
             uint8_t* mapped = nullptr;
             d.buffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
             std::vector<uint8_t> out(size_t(d.width) * d.height * 4);
+            // Depth: the values between the clear values (0, 1) stretched over the grey range, so a
+            // map of depths close together (a shadow map) shows its shapes.
+            float lo = 1.0f, hi = 0.0f;
+            if (d.format == DXGI_FORMAT_R32_FLOAT)
+                for (UINT y = 0; y < d.height; y++)
+                    for (UINT x = 0; x < d.width; x++)
+                        if (const float f = reinterpret_cast<const float*>(mapped + size_t(y) * d.pitch)[x]; f > 0.0f && f < 1.0f)
+                            lo = std::min(lo, f), hi = std::max(hi, f);
+            // REGPU_DUMP_ALPHA=1: colour dumps keep their alpha (opaque otherwise, to view).
+            static LiveSwitch keepAlpha("REGPU_DUMP_ALPHA");
             for (UINT y = 0; y < d.height; y++)
                 for (UINT x = 0; x < d.width; x++)
                 {
@@ -7351,17 +7697,19 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
                         d.maxDepth = std::max(d.maxDepth, f);
                         if (f > 0.0f && f < 1.0f)
                             d.midCount++;
-                        o[0] = o[1] = o[2] = uint8_t(std::clamp(f, 0.0f, 1.0f) * 255.0f + 0.5f);
+                        const float g = f <= 0.0f ? 0.0f : f >= 1.0f ? 1.0f : hi > lo ? 0.1f + 0.8f * (f - lo) / (hi - lo) : 0.5f;
+                        o[0] = o[1] = o[2] = uint8_t(g * 255.0f + 0.5f);
                         o[3] = 255;
                     }
                     else
                         memcpy(o, mapped + size_t(y) * d.pitch + x * 4, 4);
-                    o[3] = 255;
+                    if (!keepAlpha || d.format == DXGI_FORMAT_R32_FLOAT)
+                        o[3] = 255;
                 }
             d.buffer->Unmap(0, nullptr);
             if (d.format == DXGI_FORMAT_R32_FLOAT)
-                Log("resolve dump: depth %08X %ux%u min %g max %g strictly-inside %llu", d.base, d.width, d.height, d.minDepth, d.maxDepth,
-                    (unsigned long long)d.midCount);
+                Log("resolve dump: depth %08X %ux%u min %g max %g strictly-inside %llu (%g to %g, drawn stretched)", d.base, d.width, d.height,
+                    d.minDepth, d.maxDepth, (unsigned long long)d.midCount, lo, hi);
             std::filesystem::create_directories("out/res");
             char name[96];
             snprintf(name, sizeof(name), "out/res/%08X_%ux%u_v%d.png", d.base, d.width, d.height, d.variant);
@@ -7444,6 +7792,7 @@ void RendererOnSwapImpl(uint64_t frameNumber, uint32_t frontBuffer)
     if (frameNumber % 600 == 0)
         Log("renderer: frame %llu: %u draws, %u skipped, %zu shaders, %zu pipelines, %zu textures", (unsigned long long)frameNumber,
             g_r.drawsThisFrame.load(), g_r.skippedThisFrame.load(), g_r.shaders.size(), g_r.pipelines.size(), g_r.textures.size());
+    g_lastFrameDraws.store(g_r.drawsThisFrame.load(), std::memory_order_relaxed);
     g_r.drawsThisFrame = g_r.skippedThisFrame = 0;
     g_r.frameIndex = (g_r.frameIndex + 1) % kFrames;
 }
@@ -7471,7 +7820,9 @@ void RendererSetGammaEntry(uint32_t index, uint32_t rgb10)
 }
 
 // The debug server's "capture": what F12 does.
-void RendererRequestCapture() { g_hotkeyFrame = g_r.frame + 1; }
+// The next whole frame, as F12 does: frame + 1 is the frame already being drawn, whose trace
+// started part-way through (the first tiles of a tiled pass were missing).
+void RendererRequestCapture() { g_hotkeyFrame = g_r.frame + 2; }
 
 // The debug server's "ps HASH [EXPR]": an empty expression drops the edit. Returns the alias (0 if dropped).
 uint64_t RendererEditPixelShader(uint64_t hash, const std::string& expr)

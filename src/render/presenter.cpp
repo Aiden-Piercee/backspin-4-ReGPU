@@ -112,6 +112,9 @@ void EnsureDevice()
 
 void CreateWindowAndDevice()
 {
+    if (HDESK desk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL))
+        SetThreadDesktop(desk);
+
     WNDCLASSW wc{};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -158,7 +161,41 @@ void CreateWindowAndDevice()
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
         g_p.window = CreateWindowW(L"regpu", GetSettings().windowTitle.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
             r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
+        // REGPU_MONITOR=<n>: centre the window on monitor n (1 the primary, 2 and up the others).
+        if (const char* m = getenv("REGPU_MONITOR"); m && atoi(m) > 0)
+        {
+            struct Pick { int want, seen; RECT work; bool found; } pick{ atoi(m), 1, {}, false };
+            EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR mon, HDC, LPRECT, LPARAM p) -> BOOL {
+                auto& k = *reinterpret_cast<Pick*>(p);
+                MONITORINFO mi{ sizeof(mi) };
+                GetMonitorInfoW(mon, &mi);
+                const int index = (mi.dwFlags & MONITORINFOF_PRIMARY) ? 1 : ++k.seen;
+                if (index == k.want)
+                {
+                    k.work = mi.rcWork;
+                    k.found = true;
+                }
+                return TRUE;
+            }, LPARAM(&pick));
+            if (pick.found)
+            {
+                const LONG w = r.right - r.left, h = r.bottom - r.top;
+                LONG x = pick.work.left + std::max<LONG>(0, (pick.work.right - pick.work.left - w) / 2);
+                LONG y = pick.work.top + std::max<LONG>(0, (pick.work.bottom - pick.work.top - h) / 2);
+                // REGPU_WINDOW_SLOT=<n>: tiled instead, left to right then down, as many to a row as fit.
+                if (const char* slot = getenv("REGPU_WINDOW_SLOT"); slot && *slot)
+                {
+                    const LONG n = atoi(slot), columns = std::max<LONG>(1, (pick.work.right - pick.work.left) / w);
+                    x = pick.work.left + (n % columns) * w;
+                    y = pick.work.top + (n / columns) * h;
+                }
+                SetWindowPos(g_p.window, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            }
+        }
     }
+    ShowWindow(g_p.window, SW_SHOWNORMAL);
+    ShowWindow(g_p.window, SW_SHOW);
+    SetForegroundWindow(g_p.window);
 
     ComPtr<IDXGIFactory4> factory;
     Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");

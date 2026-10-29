@@ -14,6 +14,8 @@ Commands (sent as typed):
   wait 30 | wait 2.5s                frames, or seconds
   shot [path]                        the next frame as a PNG (default out/live.png)
   capture                            what F12 does (trace the next frame into out/capture)
+  freeze [on|off]                    what F9 does: hold the picture (the last frame drawn again; live ps/vs
+                                     edits and switches apply); no argument toggles
   log [n]                            the last n lines of the log
   peek ADDR [bytes] | poke ADDR HEX  guest memory (hex addresses, big-endian bytes)
   ps HASH EXPR | ps HASH tint R,G,B  that pixel shader returns EXPR (HLSL over r[], input.o[], ...) or a flat

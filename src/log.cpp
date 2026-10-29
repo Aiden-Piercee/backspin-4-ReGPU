@@ -27,7 +27,7 @@ void Write(const char* prefix, const char* fmt, va_list args)
     if (g_recent.size() > 2000)
         g_recent.pop_front();
     if (!g_logFile)
-        g_logFile = fopen("regpu.log", "w");
+        g_logFile = fopen(getenv("REGPU_LOG") && *getenv("REGPU_LOG") ? getenv("REGPU_LOG") : "regpu.log", "w"); // REGPU_LOG: another file
     for (FILE* f : { stderr, g_logFile })
     {
         if (f)
