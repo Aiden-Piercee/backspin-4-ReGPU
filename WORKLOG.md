@@ -190,3 +190,20 @@ not the one in progress (its trace used to start mid-frame, without the first ti
   first draws (clears, depth reset) and that copy. Full-screen UI screens (menus, loading) render correctly.
 - NtReadFile still calls completion APCs inline, which nests one guest frame per chained read (no APC queue).
 - Untranslated shader ops: `scalar op 51`, `scalar op 63`, `instruction out of range` (ReGPU logs which).
+
+---
+
+## 2026-10-29: vertex fetch clamp fix, title-bar stats
+
+- **Every vertex fetch returned 0 after `5bcaae5` (`6ec6f8a`).** The backport's out-of-bounds clamp in
+  `LoadGuest` (`src/gpu/hlsl.cpp`) compares against `vf[fetch].w`, but the renderer clears `vf` and only set
+  `.x/.y/.z`, so geometry collapsed (split white/black screen, no video, skinned players "bobble-headed").
+  `src/gpu/renderer.cpp` now sets `vf[k][3] = bytes / 4` in the direct and copied paths. All `5bcaae5`
+  backports stay. `ts4` still has the bug until it is brought up to date with `main`.
+- **fps and frame time in the window title (`92453e1`).** Average and worst frame time over 0.5 s.
+  `REGPU_NO_TITLE_STATS=1` turns it off.
+- **First launch after any `hlsl.cpp` preamble change recompiles every shader** (minutes at 2-8 s each,
+  4 fps meanwhile); later launches load `build/user/shadercache` and `pipelines.bin` in under a second.
+- **Seen once, not reproduced:** after the rebuild, two launches showed the lower tile (rows 384+) black on
+  the pre-play screen at 720p, with bobbing players. Five later restarts were clean. Probably the open
+  predicated-tiling lower-tile issue above; if it returns, leave the game running and `regpuctl capture`.
