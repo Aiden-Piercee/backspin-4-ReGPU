@@ -15,7 +15,7 @@ cbuffer VSConstants : register(b0)
     float4 vc[256];
     uint4 vb[2];      // 256 bool constants
     uint4 vl[8];      // 32 loop constants: count | start << 8 | step << 16
-    uint4 vf[96];     // vertex fetch: x byte offset (gmem, or gphys if z), y endian
+    uint4 vf[96];     // vertex fetch: x byte offset (gmem, or gphys if z), y endian, w size in dwords
     uint4 vinfo;      // x index list byte offset, y position mode (0 clip, 1 screen) | 2 points, z/w target size
     float4 vpoint;    // xy constant point diameter (pixels), z/w min/max diameter
     float4 vscale;    // PA_CL_VPORT_X/Y/ZSCALE
