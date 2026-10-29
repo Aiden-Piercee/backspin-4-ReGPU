@@ -122,6 +122,11 @@ target_link_libraries(topspin4 PRIVATE
     onecore
     dbghelp
     bcrypt
+    winhttp
+    comctl32
+    comdlg32
+    ole32
+    shell32
 )
 
 # Optional diagnostic target: link check

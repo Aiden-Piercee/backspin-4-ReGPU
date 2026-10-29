@@ -358,7 +358,7 @@ fs::path ZipOverlay(const std::string& zip, const fs::path& host)
 {
     static std::mutex mutex;
     static std::map<std::string, fs::path> done;
-    static const bool off = getenv("FM2_NO_OVERLAY") != nullptr;
+    static const bool off = getenv("FM2_NO_OVERLAY") != nullptr || getenv("TS4_NO_OVERLAY") != nullptr;
     if (off)
         return host;
     std::lock_guard lock(mutex);

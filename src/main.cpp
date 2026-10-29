@@ -1,6 +1,7 @@
 #include <filesystem>
 #include <thread>
 #include <algorithm>
+#include <string>
 
 #include <windows.h>
 
@@ -10,6 +11,8 @@
 #include "debug.h"
 #include "log.h"
 #include "memory.h"
+#include "ts4_settings.h"
+#include "launcher.h"
 
 void CrashHandlerInit();
 void GpuLogState();
@@ -20,7 +23,49 @@ int main(int argc, char** argv)
         SetThreadDesktop(desk);
 
     CrashHandlerInit();
-    std::filesystem::path gameDir = argc > 1 ? argv[1] : "game";
+
+    // Parse command line arguments
+    std::filesystem::path gameDir = "game";
+    bool explicitGameDir = false;
+    bool noLauncherArg = false;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        if (arg == "--no-launcher")
+        {
+            noLauncherArg = true;
+        }
+        else if (arg[0] != '-')
+        {
+            gameDir = arg;
+            explicitGameDir = true;
+        }
+    }
+
+    if (noLauncherArg)
+        SetEnvironmentVariableA("TS4_NO_LAUNCHER", "1");
+
+    // Load persisted settings
+    LoadTs4Settings();
+    Ts4Settings& s = GetTs4Settings();
+    if (!explicitGameDir && !s.gameDir.empty())
+        gameDir = s.gameDir;
+
+    // Run launcher unless bypassed
+    if (!noLauncherArg && !getenv("TS4_NO_LAUNCHER") && !getenv("FM2_NO_LAUNCHER") &&
+        !getenv("TS4_TOUR") && !getenv("TS4_HEADLESS"))
+    {
+        if (!RunLauncher(gameDir))
+        {
+            Log("topspin4: launcher quit by user");
+            return 0;
+        }
+    }
+
+    // Apply settings to runtime and GPU config
+    ApplyTs4SettingsToRuntime();
+
     Log("topspin4: game folder %s", std::filesystem::absolute(gameDir).string().c_str());
 
     MemoryInit();
