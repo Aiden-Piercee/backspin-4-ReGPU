@@ -78,13 +78,6 @@ void RuntimeInit(const std::filesystem::path& gameDir)
     Log("runtime: TSC %.3f MHz, user data in %s", g_tscFrequency / 1e6, g_userDir.string().c_str());
 
     std::thread(TimeStampThread).detach();
-    // The test launcher (launcher.cpp): settings before the window, GPU and audio start.
-    bool RunLauncher();
-    if (!RunLauncher())
-    {
-        Log("runtime: quit from the launcher");
-        std::_Exit(0);
-    }
     // Top Spin 4 paces itself on the 60 Hz vblank, presenting on every one or every second one.
     // ReGPU's frame limiter and the swap chain's vsync are two more 60 Hz clocks out of phase with
     // it, and frames that wait on all three stutter. Neither is needed: the vblank sets the rate.
