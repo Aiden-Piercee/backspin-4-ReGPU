@@ -1,4 +1,42 @@
 build/
 out/
+generated/
+game
 __pycache__/
 *.pyc
+
+# Local inputs copied from sibling repos and the game disc (never committed)
+/_ext/
+/out/
+/build/
+/generated/
+/game
+game/
+_ext/
+
+# Build outputs and test instances
+build*/
+/shadowtest/
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+*.log
+d3dcompiler_47.dll
+pipelines.bin
+pipelines.manifest
+
+# Game data
+*.xex
+*.arc
+*.xzp
+*.wmv
+
+# Screenshots and dumps left at the root
+/*.png
+/*.raw
+/tools/audiotest/profile/
+/tools/audiotest/logs/
+prebuilt/
+game

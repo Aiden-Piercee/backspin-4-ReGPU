@@ -25,14 +25,19 @@
 #include "log.h"
 #include "memory.h"
 #include "settings.h"
+#include "kernel/thread.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
 void RendererRequestCapture(); // renderer.cpp: F12
+void GpuSetFreeze(bool on);    // gpu.cpp: F9
+bool GpuFreezeWanted();
+bool GpuFrozen();
 uint64_t RendererEditPixelShader(uint64_t hash, const std::string& expr);
 std::string RendererShaderHlsl(uint64_t hash);
 bool RendererPsEditReady(uint64_t alias);
 std::string RendererDrawStats();
+uint32_t RendererLastFrameDraws();
 
 namespace
 {
@@ -132,7 +137,7 @@ std::string Handle(const std::string& line)
         while (!g_swapTimes.empty() && now - g_swapTimes.front() > std::chrono::seconds(1))
             g_swapTimes.pop_front();
         char buf[256];
-        snprintf(buf, sizeof(buf), "\"frame\":%llu,\"fps\":%zu", (unsigned long long)g_frame, g_swapTimes.size());
+        snprintf(buf, sizeof(buf), "\"frame\":%llu,\"fps\":%zu,\"draws\":%u", (unsigned long long)g_frame, g_swapTimes.size(), RendererLastFrameDraws());
         return Ok(buf);
     }
     // press A [ms]   press A+B 200   (held for ms, default 120, then released)
@@ -242,6 +247,24 @@ std::string Handle(const std::string& line)
     {
         RendererRequestCapture();
         return Ok("\"note\":\"traced into out\\\\capture and play log at the next frame\"");
+    }
+    // freeze [on|off]: hold the picture (the title waits, the last frame is drawn again, live
+    // edits apply), as F9 does; no argument toggles
+    if (cmd == "freeze")
+    {
+        std::string arg;
+        in >> arg;
+        const bool on = arg == "on" ? true : arg == "off" ? false : !GpuFreezeWanted();
+        GpuSetFreeze(on);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (GpuFrozen() != on && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return Ok(std::string("\"wanted\":") + (on ? "true" : "false") + ",\"frozen\":" + (GpuFrozen() ? "true" : "false"));
+    }
+    if (cmd == "threads")
+    {
+        LogGuestThreads();
+        return Ok("\"note\":\"logged thread states\"");
     }
     // log [n]: the last n log lines
     if (cmd == "log")

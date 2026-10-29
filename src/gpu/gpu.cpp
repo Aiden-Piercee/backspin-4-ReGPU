@@ -52,6 +52,11 @@ struct Gpu
     std::atomic<uint32_t> interruptCallback{ 0 };
     std::atomic<uint32_t> interruptData{ 0 };
     uint32_t rptr = 0;
+    // VdInitializeRingBuffer can replace the ring while the command processor is running the old
+    // one (a title handing the GPU from one module's D3D device to another's). ringMutex orders
+    // that against the CP's read pointer updates; the generation tells the CP its ring is gone.
+    std::mutex ringMutex;
+    uint32_t ringGeneration = 0;
 
     bool interruptThread = false;
     std::mutex interruptMutex;
@@ -90,6 +95,40 @@ struct Gpu
 
 Gpu g_gpu;
 bool g_trace = getenv("REGPU_GPUTRACE") != nullptr;
+
+// Freeze (F9 in the game window, regpuctl "freeze"): once asked, the command processor copies
+// the next whole frame it reaches and the title's render thread is held in its next VdSwap; the
+// command processor then runs that copy again and again, so live shader edits and switches show
+// on a still image. (The title advances the ring's write pointer only after VdSwap returns: the
+// swap it is in is never reached while it waits.) A swap's NOP block usually sits in an indirect
+// buffer, so a frame is the rest of that buffer after the previous swap, the ring packets after
+// it, and the buffer of this swap up to it (FreezeOnSwap). Replays leave guest memory, the read
+// pointer and the title's waits alone.
+struct Freeze
+{
+    std::atomic<bool> wanted{ false };
+    std::atomic<bool> frozen{ false };    // the render thread is held in VdSwap
+    std::atomic<bool> replaying{ false }; // the command processor is in a replay
+    std::atomic<uint64_t> snapFrame{ 0 }; // the frame copied for replays (0: none)
+    uint32_t copy = 0, copyCapacity = 0, copyDwords = 0; // guest buffer with the frame's packets
+    uint64_t copyFrame = 0;
+    uint32_t copyFrontBuffer = 0;
+    // The frame being copied (command processor thread): what followed the previous swap in its
+    // buffer, and the ring index after that buffer's packet.
+    std::vector<uint32_t> head;
+    uint32_t headRingNext = 0;
+    bool haveHead = false;
+    // The registers as the freeze found them (the title polls some, as fences): replays rewrite
+    // them with the frame's values, so those they wrote (dirty) are put back before the title goes
+    // on. The others keep what the title wrote meanwhile (its interrupt handler moves the ring's
+    // write pointer).
+    std::vector<uint8_t> savedRegs;
+    std::vector<uint8_t> dirty = std::vector<uint8_t>(0x8000);
+    uint64_t savedBinMask = 0, savedBinSelect = 0;
+    std::atomic<bool> saved{ false };
+};
+Freeze g_freeze;
+bool g_replay = false; // command processor thread: inside a replay
 
 void RaiseInterrupt(uint32_t source, uint32_t cpu)
 {
@@ -371,6 +410,7 @@ void SubmitDraw(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         {
             seg::Flush();
             FrameOnDraw(initiator, dmaBase, dmaSize);
+            RendererTileAfterResolve(seg::g_tile);
             return;
         }
         if (!seg::g_open || seg::g_draws % seg::kSnapEvery == 0)
@@ -458,15 +498,14 @@ void DispatchInterrupt(PPCContext& ctx, uint32_t source, uint32_t cpu)
         return;
     // The handler acknowledges by clearing the bit of the CPU it runs on,
     // read from the PCR; it runs with that CPU's interrupts disabled.
-    const regpu::Host& host = regpu::GetHost();
-    *GuestPtr<uint8_t>(host.currentPcr() + kpcr::CurrentCpu) = uint8_t(cpu);
-    host.interruptLockAcquire(int(cpu));
+    *GuestPtr<uint8_t>(CurrentGuestThread()->pcr + kpcr::CurrentCpu) = uint8_t(cpu);
+    InterruptLockAcquire(int(cpu));
     ctx.msr &= ~0x8000ull;
     ctx.r3.u64 = source;
     ctx.r4.u64 = g_gpu.interruptData;
-    host.guestCall(ctx, callback);
+    GuestCall(ctx, callback);
     ctx.msr |= 0x8000;
-    host.interruptLockRelease();
+    InterruptLockRelease();
 }
 
 // Vblank callbacks run on a guest thread of their own, like the console's
@@ -508,6 +547,8 @@ void WriteBackNow(uint32_t address, uint32_t value)
 void WriteBack(uint32_t address, uint32_t value)
 {
     seg::Flush(); // a fence: after the draws before it
+    if (g_replay)
+        return; // a frozen frame run again: the title's memory stays as it was
     if (work::Active())
     {
         uint32_t* p = work::Begin(work::kWriteBack, 2);
@@ -575,6 +616,8 @@ uint32_t g_lutIndex = 0;
 
 void WriteRegister(uint32_t index, uint32_t value)
 {
+    if (g_replay)
+        g_freeze.dirty[index & 0x7FFF] = 1;
     SetReg(index, value);
     if (index == DC_LUT_RW_INDEX)
         g_lutIndex = value & 0xFF;
@@ -590,7 +633,7 @@ void WriteRegister(uint32_t index, uint32_t value)
         const uint32_t be = __builtin_bswap32(value);
         work::LogRegs(index, &be, 1);
     }
-    if (index >= SCRATCH_REG0 && index < SCRATCH_REG0 + 8)
+    if (index >= SCRATCH_REG0 && index < SCRATCH_REG0 + 8 && !g_replay) // a replay's fences stay unwritten
     {
         const uint32_t n = index - SCRATCH_REG0;
         if ((Reg(SCRATCH_UMSK) >> n) & 1)
@@ -617,6 +660,9 @@ void WriteRegisters(uint32_t index, uint32_t source, uint32_t count)
     const bool lut = index <= DC_LUT_30_COLOR && index + count > DC_LUT_RW_INDEX;
     if (!lut && (index + count <= SCRATCH_REG0 || index >= SCRATCH_REG0 + 8))
     {
+        if (g_replay)
+            for (uint32_t i = 0; i < count; i++)
+                g_freeze.dirty[(index + i) & 0x7FFF] = 1;
         memcpy(GuestPtr<uint8_t>(kRegisterBase + index * 4), GuestPtr<uint8_t>(source), size_t(count) * 4);
         if (seg::g_open)
             seg::Append(seg::kRegs, &index, 1, GuestPtr<uint32_t>(source), count);
@@ -629,6 +675,87 @@ void WriteRegisters(uint32_t index, uint32_t source, uint32_t count)
 }
 
 // Executes one packet at ptr; returns its size in dwords.
+// Freeze asked: a swap reached at ptr (its NOP block) ends the frame being copied, or starts one.
+void FreezeOnSwap(uint32_t ptr, uint64_t frame, uint32_t frontBuffer)
+{
+    auto& f = g_freeze;
+    if (!f.wanted.load() || f.snapFrame.load())
+    {
+        f.haveHead = false;
+        return;
+    }
+    const uint32_t base = g_gpu.ringBase, size = g_gpu.ringDwords;
+    const uint32_t ringAt = g_gpu.rptr; // the ring packet being run
+    std::vector<uint32_t> tail;         // this swap's buffer up to it
+    if (t_cursors.size() == 1)
+    {
+        const uint32_t header = LoadBE32(base + ringAt * 4), op = (header >> 8) & 0x7F;
+        const uint32_t buffer = PhysToGuest(LoadBE32(base + ((ringAt + 1) % size) * 4) & ~3u);
+        if ((header >> 30) != 3 || (op != 0x3F && op != 0x37) || ptr < buffer || ptr >= t_cursors.back().end)
+        {
+            LOG_ONCE("gpu: freeze: swap block %08X not in the ring's indirect buffer: not frozen", ptr);
+            f.haveHead = false;
+            return;
+        }
+        for (uint32_t a = buffer; a < ptr; a += 4)
+            tail.push_back(LoadBE32(a));
+    }
+    else if (!t_cursors.empty())
+    {
+        LOG_ONCE("gpu: freeze: swap block %08X in a nested buffer: not frozen", ptr);
+        f.haveHead = false;
+        return;
+    }
+    if (f.haveHead)
+    {
+        const uint32_t ringCount = (ringAt + size - f.headRingNext) % size;
+        const uint32_t total = uint32_t(f.head.size()) + ringCount + uint32_t(tail.size());
+        if (total + 0x4002 > f.copyCapacity)
+        {
+            f.copyCapacity = std::max<uint32_t>(total, 1u << 20) + 0x4002;
+            f.copy = RegpuGuestAlloc(Heap::Virtual, f.copyCapacity * 4);
+        }
+        uint32_t k = 0;
+        for (uint32_t v : f.head)
+            StoreBE32(f.copy + 4 * k++, v);
+        for (uint32_t i = 0; i < ringCount; i++)
+            StoreBE32(f.copy + 4 * k++, LoadBE32(base + ((f.headRingNext + i) % size) * 4));
+        for (uint32_t v : tail)
+            StoreBE32(f.copy + 4 * k++, v);
+        f.copyDwords = total;
+        f.copyFrame = frame;
+        f.copyFrontBuffer = frontBuffer;
+        f.haveHead = false;
+        f.snapFrame.store(frame);
+        Log("gpu: freeze: frame %llu copied (%zu + %u + %zu dwords)", (unsigned long long)frame, f.head.size(), ringCount, tail.size());
+        return;
+    }
+    // The next frame starts after this swap's block: the rest of its buffer, then the ring.
+    f.head.clear();
+    if (!t_cursors.empty())
+        for (uint32_t a = ptr + 4; a < t_cursors.back().end; a += 4)
+            f.head.push_back(LoadBE32(a));
+    f.headRingNext = g_ringNext;
+    f.haveHead = true;
+}
+
+// The frame ends for the renderer.
+void PresentSwap(uint64_t frame, uint32_t frontBuffer)
+{
+    seg::Flush();
+    seg::g_tile = RendererTile{};
+    if (work::Active())
+    {
+        uint32_t* p = work::Begin(work::kSwap, 3);
+        p[0] = uint32_t(frame);
+        p[1] = uint32_t(frame >> 32);
+        p[2] = frontBuffer;
+        work::End(3);
+    }
+    else
+        FrameOnSwap(frame, frontBuffer);
+}
+
 uint32_t ExecutePacket(uint32_t ptr)
 {
     const uint32_t header = LoadBE32(ptr);
@@ -668,18 +795,8 @@ uint32_t ExecutePacket(uint32_t ptr)
             {
                 const auto swap = g_gpu.pendingSwaps[i];
                 g_gpu.pendingSwaps.erase(g_gpu.pendingSwaps.begin(), g_gpu.pendingSwaps.begin() + i + 1);
-                seg::Flush();
-                seg::g_tile = RendererTile{};
-                if (work::Active())
-                {
-                    uint32_t* p = work::Begin(work::kSwap, 3);
-                    p[0] = uint32_t(swap.frame);
-                    p[1] = uint32_t(swap.frame >> 32);
-                    p[2] = swap.frontBuffer;
-                    work::End(3);
-                }
-                else
-                    FrameOnSwap(swap.frame, swap.frontBuffer);
+                PresentSwap(swap.frame, swap.frontBuffer);
+                FreezeOnSwap(ptr, swap.frame, swap.frontBuffer);
                 break;
             }
         }
@@ -733,6 +850,8 @@ uint32_t ExecutePacket(uint32_t ptr)
         break;
     case 0x5A: // EVENT_WRITE_EXT: screen extents of the previous draws.
     {
+        if (g_replay) // a frozen frame run again: the title's memory stays as it was
+            break;
         // D3D's predicated tiling turns these into the bins each draw
         // touches. Report the whole screen: every draw may touch every tile.
         const uint16_t extents[6] = { 0, 8192 >> 3, 0, 8192 >> 3, 0, 1 };
@@ -743,6 +862,8 @@ uint32_t ExecutePacket(uint32_t ptr)
     }
     case 0x5B: // EVENT_WRITE_ZPD: occlusion query sample counts.
     {
+        if (g_replay)
+            break;
         // At a query's end D3D has written 0xFFFFFEED to the counters;
         // answer with a fixed number of visible samples.
         const uint32_t counts = GpuPhysToGuest(gpureg::Get(0x2325) & ~3u); // RB_SAMPLE_COUNT_ADDR
@@ -807,7 +928,7 @@ uint32_t ExecutePacket(uint32_t ptr)
         // spin, then yield, then sleep.
         const auto start = Clock::now();
         static const int spinMs = getenv("REGPU_CP_SPIN_MS") ? atoi(getenv("REGPU_CP_SPIN_MS")) : 100;
-        for (int tries = 0;; tries++)
+        for (int tries = 0; !g_replay; tries++) // a replay doesn't wait: the title is held
         {
             const uint32_t value = (info & 0x10) ? ReadBack(arg(1)) : Reg(arg(1));
             if (WaitCompare(info & 7, value & arg(3), arg(2)))
@@ -860,6 +981,8 @@ uint32_t ExecutePacket(uint32_t ptr)
     }
     case 0x54: // INTERRUPT: cpu mask
         seg::Flush();
+        if (g_replay) // a frozen frame run again: the title's handler doesn't hear of it
+            break;
         work::Drain(); // after the draws before it, like the hardware
         for (uint32_t cpu = 0; cpu < 6; cpu++)
         {
@@ -1115,6 +1238,53 @@ void GpuLookahead()
 
 namespace
 {
+// Runs the ring's packets from start to end (indices; a packet may wrap past the end).
+void RunRing(uint32_t base, uint32_t size, uint32_t start, uint32_t end)
+{
+    const uint32_t total = (end + size - start) % size;
+    for (uint32_t i = start, done = 0; done < total;)
+    {
+        const uint32_t header = LoadBE32(base + i * 4);
+        uint32_t length = 1;
+        switch (header >> 30)
+        {
+        case 0:
+        case 3: length = ((header >> 16) & 0x3FFF) + 2; break;
+        case 1: length = 3; break;
+        default: break;
+        }
+        g_ringNext = (i + length) % size;
+        uint32_t used;
+        if (i + length <= size)
+            used = ExecutePacket(base + i * 4);
+        else
+        {
+            static const uint32_t scratch = RegpuGuestAlloc(Heap::Virtual, 0x4002 * 4);
+            for (uint32_t k = 0; k < length; k++)
+                StoreBE32(scratch + k * 4, LoadBE32(base + ((i + k) % size) * 4));
+            used = ExecutePacket(scratch);
+        }
+        i = (i + used) % size;
+        done += used;
+    }
+}
+
+// Frozen: the copied frame again, at most 60 times a second.
+void ReplayFrame()
+{
+    static auto next = Clock::now();
+    if (Clock::now() < next)
+    {
+        Sleep(1);
+        return;
+    }
+    next = Clock::now() + std::chrono::microseconds(16667);
+    g_replay = true;
+    RunRing(g_freeze.copy, 0x40000000, 0, g_freeze.copyDwords); // linear: no wrap
+    g_replay = false;
+    PresentSwap(g_freeze.copyFrame, g_freeze.copyFrontBuffer);
+}
+
 void CommandProcessorLoop(PPCContext& ctx)
 {
     t_cpContext = &ctx;
@@ -1147,12 +1317,51 @@ void CommandProcessorLoop(PPCContext& ctx)
     }
     for (;;)
     {
-        const uint32_t base = g_gpu.ringBase, size = g_gpu.ringDwords;
+        uint32_t base, size, generation;
+        {
+            std::lock_guard lock(g_gpu.ringMutex);
+            base = g_gpu.ringBase;
+            size = g_gpu.ringDwords;
+            generation = g_gpu.ringGeneration;
+        }
         if (!base || !size)
         {
             Sleep(1);
             continue;
         }
+        // Frozen (VdSwap holds the title): replay the last frame. replaying is raised before
+        // frozen is read, so VdSwap, which lowers frozen and then waits for replaying to drop,
+        // never lets the title write the ring under a replay.
+        g_freeze.replaying.store(true);
+        if (g_freeze.frozen.load())
+        {
+            if (!g_freeze.saved.load())
+            {
+                g_freeze.savedRegs.assign(GuestPtr<uint8_t>(kRegisterBase), GuestPtr<uint8_t>(kRegisterBase) + 0x8000 * 4);
+                g_freeze.savedBinMask = g_gpu.binMask;
+                g_freeze.savedBinSelect = g_gpu.binSelect;
+                g_freeze.saved.store(true);
+            }
+            if (g_freeze.snapFrame.load())
+                ReplayFrame();
+            else
+                Sleep(1);
+            g_freeze.replaying.store(false);
+            continue;
+        }
+        if (g_freeze.saved.load())
+        {
+            for (uint32_t i = 0; i < 0x8000; i++)
+                if (g_freeze.dirty[i])
+                {
+                    memcpy(GuestPtr<uint8_t>(kRegisterBase + i * 4), &g_freeze.savedRegs[i * 4], 4);
+                    g_freeze.dirty[i] = 0;
+                }
+            g_gpu.binMask = g_freeze.savedBinMask;
+            g_gpu.binSelect = g_freeze.savedBinSelect;
+            g_freeze.saved.store(false);
+        }
+        g_freeze.replaying.store(false);
         const uint32_t wptr = Reg(CP_RB_WPTR) % size;
         if (g_gpu.rptr == wptr)
         {
@@ -1160,7 +1369,8 @@ void CommandProcessorLoop(PPCContext& ctx)
             Sleep(0);
             continue;
         }
-        while (g_gpu.rptr != wptr)
+        bool replaced = false;
+        while (!replaced && g_gpu.rptr != wptr)
         {
 
             // A packet may wrap past the end of the ring: run it from a
@@ -1185,6 +1395,14 @@ void CommandProcessorLoop(PPCContext& ctx)
                     StoreBE32(scratch + i * 4, LoadBE32(base + ((g_gpu.rptr + i) % size) * 4));
                 used = ExecutePacket(scratch);
             }
+            std::lock_guard lock(g_gpu.ringMutex);
+            if (g_gpu.ringGeneration != generation)
+            {
+                // The ring was replaced during this packet: the new one starts at 0, and this
+                // ring's position must not land in it.
+                replaced = true;
+                break;
+            }
             g_gpu.rptr = (g_gpu.rptr + used) % size;
             // Publish progress packet by packet: the title waits for ring
             // space by polling this, and only publishing once the ring is
@@ -1193,9 +1411,6 @@ void CommandProcessorLoop(PPCContext& ctx)
             if (const uint32_t wb = g_gpu.rptrWriteback)
                 StoreBE32(wb, g_gpu.rptr);
         }
-        SetReg(CP_RB_RPTR, g_gpu.rptr);
-        if (const uint32_t wb = g_gpu.rptrWriteback)
-            StoreBE32(wb, g_gpu.rptr);
     }
 }
 
@@ -1220,12 +1435,14 @@ void VblankLoop()
     auto next = Clock::now();
     for (;;)
     {
-        // The title presents on vblanks: every one in gameplay, often every second one in menus. It
-        // keeps game time by the clock, not by frames, so vblanks run at twice the frame cap
-        // (120-720 Hz) and the limiter in VdSwap sets the frame rate for both.
+        // The title presents on vblanks: every one in gameplay, often every second one in menus.
+        // Vblanks run at the console's 60 Hz: a title can step animation per vblank rather than per
+        // frame, and a faster vblank speeds that up (at 120 Hz such animation ran at double speed).
+        // The limiter in VdSwap still sets the frame rate. REGPU_VBLANK_HZ=120: the old rate.
         static const int64_t periodUs = [] {
             const char* v = getenv("REGPU_VBLANK_HZ");
-            const int hz = v ? std::clamp(atoi(v), 30, 1000) : std::clamp(int(FrameCap()) * 2, 120, 720);
+            const int hz = v && *v ? std::clamp(atoi(v), 30, 1000) : 60;
+            Log("gpu: vblank %d Hz", hz);
             return int64_t(1000000 / hz);
         }();
         next += std::chrono::microseconds(periodUs);
@@ -1257,11 +1474,22 @@ void GpuStartInterruptThread()
     if (g_gpu.interruptThread)
         return;
     g_gpu.interruptThread = true;
-    regpu::GetHost().createThread("gpu vblank irq", InterruptLoop);
-    regpu::GetHost().createThread("gpu command processor", CommandProcessorLoop);
+    CreateHostGuestThread("gpu vblank irq", InterruptLoop);
+    CreateHostGuestThread("gpu command processor", CommandProcessorLoop);
 }
 
 uint64_t GpuSwapCount() { return g_gpu.swaps; }
+
+// Freeze (see Freeze): on, off; GpuFrozen tells whether the title is held now.
+void GpuSetFreeze(bool on)
+{
+    if (on && !g_freeze.wanted.load())
+        g_freeze.snapFrame.store(0); // a copy from a freeze lifted before it took
+    g_freeze.wanted.store(on);
+    Log("gpu: freeze %s", on ? "requested" : "lifted");
+}
+bool GpuFreezeWanted() { return g_freeze.wanted.load(); }
+bool GpuFrozen() { return g_freeze.frozen.load(); }
 
 void GpuLogState()
 {
@@ -1302,9 +1530,17 @@ GUEST_EXPORT(VdSetGraphicsInterruptCallback)
 GUEST_EXPORT(VdInitializeRingBuffer)
 {
     // (physical address, log2 of size in qwords? - size = 1 << (log2 + 3) bytes)
-    g_gpu.ringBase = PhysToGuest(ctx.r3.u32);
-    g_gpu.ringDwords = (1u << (ctx.r4.u32 + 3)) / 4;
-    g_gpu.rptr = 0;
+    // A new ring starts empty: both pointers back to 0, as the kernel resets the CP. Without the
+    // write pointer reset, the CP would run the new ring's stale contents up to the old one's.
+    {
+        std::lock_guard lock(g_gpu.ringMutex);
+        g_gpu.ringBase = PhysToGuest(ctx.r3.u32);
+        g_gpu.ringDwords = (1u << (ctx.r4.u32 + 3)) / 4;
+        g_gpu.rptr = 0;
+        g_gpu.ringGeneration++;
+        SetReg(CP_RB_WPTR, 0);
+        SetReg(CP_RB_RPTR, 0);
+    }
     Log("gpu: ring buffer at %08X, %u dwords", g_gpu.ringBase.load(), g_gpu.ringDwords.load());
 }
 
@@ -1453,6 +1689,27 @@ GUEST_EXPORT(VdSwap)
                 PreciseSleepUntil(next, 300);
         }
         next = std::max(next, now) + std::chrono::microseconds(minFrameUs);
+    }
+    // Freeze: hold the title here once the command processor has copied a frame (it replays
+    // that), until it is lifted. Waits briefly for the previous frame's copy; without one this
+    // frame goes on, and the command processor copies it when it reaches its swap.
+    if (g_freeze.wanted.load())
+    {
+        const auto start = Clock::now();
+        while (g_freeze.wanted.load() && !g_freeze.snapFrame.load() && Clock::now() - start < std::chrono::milliseconds(100))
+            Sleep(1);
+        if (g_freeze.wanted.load() && g_freeze.snapFrame.load())
+        {
+            g_freeze.frozen.store(true);
+            Log("gpu: frozen at frame %llu", (unsigned long long)n);
+            while (g_freeze.wanted.load())
+                Sleep(5);
+            g_freeze.frozen.store(false);
+            while (g_freeze.replaying.load() || g_freeze.saved.load()) // registers put back
+                Sleep(0);
+            g_freeze.snapFrame.store(0);
+            Log("gpu: resumed");
+        }
     }
     Return(ctx, 0);
 }

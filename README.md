@@ -1,110 +1,109 @@
-# ReGPU
+# Top Spin 4-ReGPU
 
-The Xbox 360 GPU (Xenos), on Direct3D 12, for native PC ports of Xbox 360 games made with
-[XenonRecomp](https://github.com/hedge-dev/XenonRecomp).
+A 'native' Windows PC port of Top Spin 4 (Xbox 360), statically recompiled using [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) and rendered on Direct3D 12 via [ReGPU](include/regpu/regpu.h).
 
-ReGPU takes the GPU's half of a port off your hands. The recompiled game talks to it exactly as it
-talked to the console: it writes command packets into a ring buffer and calls the kernel's `Vd*` video
-functions. ReGPU runs the command processor, translates the Xenos shader microcode to HLSL, emulates
-EDRAM, resolves, MSAA and the texture formats, presents the frames, and can upscale them (FSR 1,
-optionally FSR 3 and DLSS).
+Top Spin 4 runs as a 'native' x64 Windows application without full system emulation. Guest PowerPC instructions are translated ahead of time into C++ functions (compiled to host machine code), while the Xbox 360 GPU (Xenos) command streams and shaders are processed on Direct3D 12 at 60 FPS.
 
-It came out of a working port, Forza Motorsport 2, where it renders the whole game. Everything
-specific to that game has been removed; what remains is the console's behaviour, plus hooks for the
-workarounds a particular game needs.
+## Current Status
+
+- Boot and Menus: Boots through legal screens, title screen, DLC enumeration, and the full main menu (Game Modes, Player Zone, Options).
+- Gameplay: Enters player select, Academy court, exhibition matches, and tournament modes.
+- Graphics: Direct3D 12 rendering pipeline at 60 FPS with EDRAM emulation, MSAA resolve handling, and FSR 1 upscaling support.
+- Audio: Multichannel 5.1 XAudio2 audio driver with FFmpeg XMA2 packet decoding and working background music playback.
+- Storage: Dedicated user folder next to the executable for saves, player profiles, and precompiled shader pipeline caches.
 
 ## Requirements
 
-- **XenonRecomp.** ReGPU is for XenonRecomp ports and builds against it: it uses XenonRecomp's
-  `PPCContext` and calling convention to provide the console's `__imp__Vd*` video exports and to call
-  the game's graphics interrupt. Your recompiled game links them like any other import. (Ports made
-  some other way are not supported.)
-- Windows 10/11, a Direct3D 12 GPU (feature level 12_0), clang-cl (as XenonRecomp's output needs),
-  CMake 3.25+, Ninja, Python 3 (a build step embeds compiled shaders).
-- The AMD FidelityFX SDK (MIT) for the FSR 1 shader headers. FSR 3 needs its signed runtime DLLs and
-  DLSS needs NVIDIA's DLSS SDK; both are off by default.
+### System Requirements
+- Windows 10 or 11 (64-bit).
+- Direct3D 12 capable GPU (Feature Level 12_0 or higher).
+- A legal copy of Top Spin 4 for Xbox 360 with extracted game files.
 
-## Building
+### Build Toolchain
+- LLVM Clang toolchain (`clang-cl`, `lld-link`, `llvm-lib`, `llvm-rc`).
+- CMake 3.25 or newer.
+- Ninja build system.
+- Windows 10 or 11 SDK (for `d3dcompiler_47.dll` and Windows headers).
+- Python 3.x (used for shader conversion and debug tooling).
 
-ReGPU is a static library your port links. In your port's CMake:
+## Quick Start
 
-```cmake
-set(REGPU_XENONRECOMP "${CMAKE_SOURCE_DIR}/thirdparty/XenonRecomp")   # XenonRecomp checkout
-set(REGPU_PPC_DIR     "${CMAKE_SOURCE_DIR}/out/ppc")                  # your game's XenonRecomp output (ppc_config.h)
-set(REGPU_FFX         "${CMAKE_SOURCE_DIR}/thirdparty/fidelityfx/Kits/FidelityFX")
-add_subdirectory(thirdparty/ReGPU)
-target_link_libraries(game PRIVATE regpu)
+### 1. Link Game Assets
+Extract your Top Spin 4 game disc files to a folder on your system, then create a directory junction named `game` in the repository root:
+
+```cmd
+cmd /c mklink /J game "C:\Path\To\Extracted\TopSpin4"
 ```
 
-Options: `REGPU_FSR3` (with the FidelityFX signed DLLs), `REGPU_DLSS` and `REGPU_DLSS_DIR`.
+Verify that `game\default.xex`, `game\Loader_DLL.xex`, and `game\Swing_DLL.xex` exist inside the junction.
 
-Ship Microsoft's `d3dcompiler_47.dll` (the Windows SDK's `Redist\D3D\x64`, redistributable) beside
-your executable: ReGPU loads it from there first. Under Wine/Proton the system copy is Wine's own,
-which can't compile the translated shaders.
+### 2. Build the Port
+Run the automated build script:
 
-To check that ReGPU builds on its own: `cmake --build build --target regpu_linkcheck`.
-
-## Hooking it up
-
-Everything is in [`include/regpu/regpu.h`](include/regpu/regpu.h). Before the game initialises
-its graphics:
-
-```cpp
-#include <regpu/regpu.h>
-
-regpu::Config& config = regpu::GetConfig();
-config.width = 1920; config.height = 1080;
-config.msaa = 4;
-config.userDir = savesFolder / "regpu";      // shader and pipeline caches
-config.windowTitle = L"My Game";
-
-regpu::Host& host = regpu::GetHost();
-host.base = guestMemoryBase;                 // the guest's 4 GB address space
-host.alloc = [](bool physical, uint32_t size, uint32_t align) { return MyGuestAlloc(physical, size, align); };
-host.createThread = [](const char* name, void (*body)(PPCContext&)) { MyCreateHostGuestThread(name, body); };
-host.currentPcr = [] { return MyCurrentThread().pcr; };
-host.guestCall = [](PPCContext& ctx, uint32_t address) { MyGuestCall(ctx, address); };
-host.interruptLockAcquire = [](int cpu) { MyInterruptLock(cpu); };
-host.interruptLockRelease = [] { MyInterruptUnlock(); };
-
-regpu::Start();   // window, device, command processor
+```cmd
+Build.bat
 ```
 
-Your runtime already has these: they are the pieces any XenonRecomp port builds for its own threads
-and memory. ReGPU never touches the rest of the kernel (files, threads, XAM, audio), which stays yours.
+This compiles the host runtime, links the 65,904 precompiled PowerPC functions from `prebuilt\`, copies required runtime DLLs, and outputs `build\topspin4.exe` (approximately 56 MB).
 
-The renderer currently assumes the game draws at 1280x720, as most Xbox 360 games do (see
-[`docs/xenos-notes.md`](docs/xenos-notes.md)).
+### 3. Launch the Game
+Run the launch script:
 
-### Game-specific fixes
+```cmd
+"Launch Top Spin 4.bat"
+```
 
-When a game needs something the console did that isn't the GPU's job, or a workaround for one of
-its shaders, use the optional hooks instead of changing ReGPU:
+The game creates and uses `build\user` for:
+- Save games and career progression (`build\user\profiles\`)
+- Shader pipeline caches (`build\user\pipelines.bin`)
+- Runtime log output (`build\user\topspin4.log`)
 
-| Hook | For |
-|---|---|
-| `rewriteShader` | Edit a shader's translated HLSL before it compiles, and tag it |
-| `onDraw` | Set four `float4` constants (`vuser`) for draws with tagged shaders |
-| `resolveWriteback` | Copy a resolved image back to memory because the game reads it on the CPU (screenshots, thumbnails, focus readback) |
-| `staticShaders`, `bootScreen` | Compile every shader in the game's files on first boot, with your own progress screen |
-| `onChar`, `onSwap` | Typed text (cheat codes), a callback per frame |
-| `logThreadStacks`, `currentStack`, `slowFrame`, `cpuUsage` | Diagnostics |
-| `SetGameWidescreen(true)` | The game itself draws wider than 16:9, so ReGPU leaves the field of view alone |
+## Architecture
 
-## Debugging
+Top Spin 4 is partitioned into three distinct executable modules:
 
-Start the game with `REGPU_DEBUG=1` and drive it from outside with
-[`tools/regpuctl.py`](tools/regpuctl.py): press buttons, take screenshots, capture a frame, edit
-shaders live, flip `REGPU_*` switches. [`CLAUDE.md`](CLAUDE.md) is the playbook.
-[`tools/xbdm.py`](tools/xbdm.py) and [`tools/xbox_fb.py`](tools/xbox_fb.py) take reference
-screenshots and memory reads from a real (modded) console over XBDM.
+| Module | Base Address | Function Count | Role |
+|---|---|---|---|
+| `default.xex` | `0x82000000` | 554 | Bootstrap loader, shared memory setup, and core handoff coordinator |
+| `Loader_DLL.xex` | `0x83000000` | 17,653 | Legal screens, intro sequence, XUI title screen, and background loading thread |
+| `Swing_DLL.xex` | `0x88000000` | 47,697 | Main engine, physics, AI, courts, player models, animations, and gameplay |
 
-## Credits and licences
+All three modules are recompiled to C++ using XenonRecomp and reside in `out/` with precompiled static libraries in `prebuilt/`.
 
-- [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) (MIT), which ReGPU builds against.
-- [Xenia](https://github.com/xenia-project/xenia)'s research into the Xenos GPU informed this
-  renderer. No Xenia code is included.
-- AMD FidelityFX SDK (MIT); NVIDIA DLSS SDK (its own licence, only with `REGPU_DLSS`); Microsoft's
-  `d3dcompiler_47.dll` (Windows SDK redistributable).
+### Graphics: ReGPU
 
-ReGPU is released under the [MIT licence](LICENSE).
+The graphics subsystem implements the Xbox 360 Xenos GPU command processor on Direct3D 12:
+- Translates Xenos microcode directly to HLSL compute and graphics shaders.
+- Manages Xbox 360 EDRAM tiling, aliased color and depth clear rectangles, and MSAA resolves.
+- Paces presentation locked to the console 60 Hz vblank signal.
+
+### Audio: XAudio2 and XMA
+
+Audio is handled through a multichannel 5.1 48 kHz XAudio2 stream. Game music and sound effects are fed through an asynchronous XMA2 decoder backed by FFmpeg, with MMIO register synchronization to handle dynamic buffer kicks and locks without loss.
+
+## Live Debugging and External Control
+
+When launched with `REGPU_DEBUG=1` (default in `Launch Top Spin 4.bat`), the port exposes a local control server on port 7341. You can inspect and control the game using `tools/regpuctl.py`:
+
+```cmd
+py -3 tools\regpuctl.py status             :: View current FPS, draws, and GPU state
+py -3 tools\regpuctl.py shot out\shot.png  :: Capture an uncompressed framebuffer screenshot
+py -3 tools\regpuctl.py capture            :: Trace draw calls and textures for the next frame
+py -3 tools\regpuctl.py threads            :: Inspect registers and call chains of active guest threads
+```
+
+## Known Areas of Work
+
+- Predicated tiling: Some in-match camera angles render in two vertical EDRAM tiles; the lower tile occasionally displays stale resolve pixels.
+- Audio queueing: Continued tuning of XMA packet streaming latency and frame pacing.
+- Rare shader opcodes: A small number of rarely hit microcode instructions log fallback warnings.
+
+## Credits and Licenses
+
+- XenonRecomp: Static PowerPC recompiler developed by hedge-dev.
+- ReGPU: Direct3D 12 Xenos GPU implementation developed by Scott (Welshgamer).
+- [topspin4-decomp](https://github.com/g-guthrie/topspin4-decomp): Research and decompilation analysis for Top Spin 4.
+- Xenia Project: Groundbreaking reverse engineering and research on Xbox 360 architecture and the Xenos GPU.
+- FFmpeg: Audio decoding components under LGPL/GPL.
+- AMD FidelityFX SDK: FSR upscaling integration under the MIT license.
+- Top Spin 4 is the property of 2K Sports and Take-Two Interactive. This project is for preservation and research purposes and requires original game assets.
