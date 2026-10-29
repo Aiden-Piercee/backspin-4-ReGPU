@@ -1,4 +1,4 @@
-name: C/C++ CI
+name: ReGPU sanity
 
 on:
   push:
@@ -7,17 +7,27 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-
+  sanity:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: configure
-      run: ./configure
-    - name: make
-      run: make
-    - name: make check
-      run: make check
-    - name: make distcheck
-      run: make distcheck
+      - uses: actions/checkout@v4
+
+      - name: Verify project structure
+        run: |
+          test -f CMakeLists.txt
+          test -d src
+          test -d include
+          test -d tests
+          test -f README.md
+
+      - name: Verify toolchain is available
+        run: |
+          cmake --version
+          python3 --version
+
+      - name: Document native build requirements
+        run: |
+          echo "ReGPU is a Windows-specific project."
+          echo "A full build requires clang-cl, Direct3D 12, XenonRecomp, and the FidelityFX SDK."
+          echo "This Linux runner only validates repository structure and tool availability."
