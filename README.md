@@ -1,4 +1,4 @@
-# Top Spin 4 (PC Port via XenonRecomp and ReGPU)
+# Top Spin 4-ReGPU
 
 A 'native' Windows PC port of Top Spin 4 (Xbox 360), statically recompiled using [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) and rendered on Direct3D 12 via [ReGPU](include/regpu/regpu.h).
 
