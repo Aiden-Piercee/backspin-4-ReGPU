@@ -92,6 +92,11 @@ uint Swap(uint v, uint e)
 
 uint LoadGuest(uint fetch, uint dword)
 {
+    // Past the end of the buffer the Xenos fetches 0. The car shadow volumes rely on it: their 10-vertex
+    // buffer is indexed far beyond its end (the index picks a corner constant), and the memory after it
+    // read as NaN positions, whose depth failed every test, so the shadows never reached the stencil.
+    if (dword >= vf[fetch].w)
+        return 0;
     uint a = vf[fetch].x + dword * 4;
     return Swap(vf[fetch].z ? gphys.Load(a) : gmem.Load(a), vf[fetch].y);
 }
@@ -1030,6 +1035,27 @@ TranslatedShader TranslateShader(const Shader& shader)
              "    if (pinfo2.w > 0.0) oC[0].rgb = clamp(oC[0].rgb, 0.0, pinfo2.w); // 7e3 target range\n"
              "    else if (pinfo2.w < 0.0) oC[0] = saturate(oC[0]); // fixed-point target\n"
              "    return oC[0];\n}\n";
+    }
+    // The colour exports as separate variables, not an array (from the FM4 port): fxc declares a local
+    // array as an indexable temp, and a driver can reorder writes to one ahead of an earlier read of
+    // the same element (a predicated alpha-fade overwrote an export whose old value was still needed).
+    // Every index is a constant here. REGPU_COLOR_EXPORT_ARRAY=1 keeps the array (read at translation).
+    static const bool exportArray = getenv("REGPU_COLOR_EXPORT_ARRAY") != nullptr;
+    if (shader.pixel && !exportArray)
+    {
+        const std::string declArray = "float4 oC[4]; [unroll] for (int k = 0; k < 4; k++) oC[k] = 0;";
+        if (const size_t at = h.find(declArray); at != std::string::npos)
+        {
+            h.replace(at, declArray.size(), "float4 oC0 = 0, oC1 = 0, oC2 = 0, oC3 = 0;");
+            for (char k = '0'; k <= '3'; k++)
+                for (size_t p = 0; (p = h.find(std::string("oC[") + k + "]", p)) != std::string::npos;)
+                    h.replace(p, 5, std::string("oC") + k);
+            // The return keeps its form: debug edits and the motion-vector variant patch "return oC[0];"
+            // (a one-element array written once and read once has nothing to reorder).
+            const std::string ret = "    return oC0;\n}\n";
+            if (const size_t r = h.rfind(ret); r != std::string::npos)
+                h.replace(r, ret.size(), "    float4 oC[1] = { oC0 };\n    return oC[0];\n}\n");
+        }
     }
     result.hlsl = h;
     result.ok = true;
