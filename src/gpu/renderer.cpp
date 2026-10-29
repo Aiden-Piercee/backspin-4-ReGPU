@@ -6283,6 +6283,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
             vc->vf[k][0] = address & 0x1FFFFFFF;
             vc->vf[k][1] = d1 & 3;
             vc->vf[k][2] = 1;
+            vc->vf[k][3] = bytes / 4; // size in dwords: LoadGuest returns 0 past it
             continue;
         }
         // REGPU_TRACE_MIDSIZE=1: log copied buffers of 16-64 KB that change within a frame (they must stay copied)
@@ -6311,6 +6312,7 @@ void DrawImpl(uint32_t initiator, uint32_t dmaBase, uint32_t dmaSize)
         }
         vc->vf[k][0] = uint32_t(dataOffset);
         vc->vf[k][1] = d1 & 3;
+        vc->vf[k][3] = bytes / 4;
     }
     // Perspective geometry in a wide pass (see ViewExtent): the game's camera already projects
     // at the wider aspect once hooks/camera_aspect.cpp widened it, so only the vertical zoom
