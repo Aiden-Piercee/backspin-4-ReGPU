@@ -2,6 +2,8 @@
 #include <thread>
 #include <algorithm>
 #include <string>
+#include <atomic>
+#include <cstdio>
 
 #include <windows.h>
 
@@ -13,6 +15,7 @@
 #include "memory.h"
 #include "ts4_settings.h"
 #include "launcher.h"
+#include "launcher_import.h"
 
 void CrashHandlerInit();
 void GpuLogState();
@@ -23,6 +26,30 @@ int main(int argc, char** argv)
         SetThreadDesktop(desk);
 
     CrashHandlerInit();
+
+    // --import <iso> <folder>: extract an Xbox 360 disc image without any window, for TS4Launcher.
+    // Prints "PROGRESS <permille> <file>", then "DONE" or "ERROR <text>" (one line each) and exits.
+    if (argc >= 4 && std::string(argv[1]) == "--import")
+    {
+        std::atomic<bool> cancel = false;
+        std::string error;
+        int last = -1;
+        const bool ok = ExtractXdvdfsIso(std::filesystem::path(argv[2]), std::filesystem::path(argv[3]), cancel,
+            [&](const ExtractProgress& prog) {
+                const int permille = int(prog.fraction * 1000.0f);
+                if (permille == last) return;
+                last = permille;
+                std::string file(prog.currentFile.begin(), prog.currentFile.end());
+                printf("PROGRESS %d %s\n", permille, file.c_str());
+                fflush(stdout);
+            }, error);
+        if (ok && error.empty())
+            printf("DONE\n");
+        else
+            printf("ERROR %s\n", error.empty() ? "extraction failed" : error.c_str());
+        fflush(stdout);
+        return ok && error.empty() ? 0 : 1;
+    }
 
     // Parse command line arguments
     std::filesystem::path gameDir = "game";

@@ -7,6 +7,12 @@ const pending = new Map()
 
 host.addEventListener("message", (e) => {
   const m = e.data
+  if (m.event === "import") {
+    $("import-box").hidden = false
+    $("import-bar").style.width = m.data.pm / 10 + "%"
+    $("import-text").textContent = (m.data.pm / 10).toFixed(1) + "%  " + m.data.file
+    return
+  }
   const p = pending.get(m.id)
   if (!p) return
   pending.delete(m.id)
@@ -104,7 +110,19 @@ $("launch").addEventListener("click", async () => {
   try { await call("launch", { settings: collect() }); status("Game started.") } catch (e) { status(e.message, true) }
   refresh()
 })
-$("setup").addEventListener("click", () => call("setup").catch((e) => status(e.message, true)))
+async function importWith(cmd) {
+  for (const id of ["import-iso", "import-folder"]) $(id).disabled = true
+  try {
+    show(await call(cmd))
+    status(state.files ? "Game files ready." : "")
+  } catch (e) { status(e.message, true) }
+  $("import-box").hidden = true
+  for (const id of ["import-iso", "import-folder"]) $(id).disabled = false
+  refresh()
+}
+$("import-iso").addEventListener("click", () => importWith("import.iso"))
+$("import-folder").addEventListener("click", () => importWith("import.folder"))
+$("import-cancel").addEventListener("click", () => call("import.cancel").catch(() => {}))
 $("shaders-delete").addEventListener("click", async () => {
   if (!confirm("Delete the shader cache? The next start recompiles shaders (a few minutes).")) return
   try { show(await call("shaders.delete")) } catch (e) { alert(e.message) }

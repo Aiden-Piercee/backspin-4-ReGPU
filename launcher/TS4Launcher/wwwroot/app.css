@@ -48,3 +48,5 @@ input[type=range] { padding: 0; accent-color: var(--accent); }
 #tip { position: fixed; max-width: 320px; background: #222c26; border: 1px solid #3a4a40; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; pointer-events: none; z-index: 9; }
 #tip[hidden] { display: none; }
 @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+.bar { height: 10px; background: var(--panel-2); border-radius: 99px; overflow: hidden; margin: 8px 0; }
+#import-bar { height: 100%; width: 0; background: var(--accent); }

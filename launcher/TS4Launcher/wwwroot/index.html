@@ -46,7 +46,13 @@
       <div class="panel-head"><h2>Ready</h2></div>
       <div class="checklist" id="checklist"></div>
       <div class="buttons-row">
-        <button class="ghost small" id="setup" data-tip="Opens the game's own window to import your disc (ISO or folder) and to check for patches.">Import game / patches…</button>
+        <button class="ghost small" id="import-iso" data-tip="Extracts your Top Spin 4 Xbox 360 disc image (ISO) into the game folder.">Import from ISO…</button>
+        <button class="ghost small" id="import-folder" data-tip="Use a folder that already has the game files (it must contain default.xex).">Use existing folder…</button>
+      </div>
+      <div id="import-box" hidden>
+        <div class="bar"><div id="import-bar"></div></div>
+        <div class="hint" id="import-text"></div>
+        <button class="ghost small danger" id="import-cancel">Cancel</button>
       </div>
       <div class="launch-box">
         <button class="launch" id="launch" data-tip="Saves these settings and starts the game.">Play</button>

@@ -31,11 +31,54 @@ public static class Game
         Process.Start(new ProcessStartInfo(Paths.Exe, "--no-launcher") { WorkingDirectory = Paths.GameRoot, UseShellExecute = false });
     }
 
-    /// <summary>Game import and patches still live in the game's own window (topspin4.exe --setup).</summary>
-    public static void Setup()
+    /// <summary>Saves the game folder to settings.ini (game_dir).</summary>
+    public static void SetGameDir(string dir)
+    {
+        var ini = Path.Combine(Paths.UserDir, "settings.ini");
+        Directory.CreateDirectory(Paths.UserDir);
+        var lines = File.Exists(ini) ? File.ReadAllLines(ini).ToList() : [];
+        var i = lines.FindIndex(l => l.StartsWith("game_dir=", StringComparison.Ordinal));
+        if (i >= 0) lines[i] = "game_dir=" + dir; else lines.Add("game_dir=" + dir);
+        File.WriteAllLines(ini, lines);
+    }
+
+    static Process? _import;
+
+    /// <summary>Extracts a disc image with topspin4.exe --import (no window), reporting progress (0-1000, file).</summary>
+    public static async Task ImportIso(string iso, string dest, Action<int, string> progress)
     {
         if (!ExePresent) throw new FileNotFoundException("topspin4.exe was not found next to the launcher.");
-        Process.Start(new ProcessStartInfo(Paths.Exe, "--setup") { WorkingDirectory = Paths.GameRoot, UseShellExecute = false });
+        if (_import is { HasExited: false }) throw new InvalidOperationException("An import is already running.");
+        var psi = new ProcessStartInfo(Paths.Exe, $"--import \"{iso}\" \"{dest}\"")
+        {
+            WorkingDirectory = Paths.GameRoot, UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true,
+        };
+        var p = _import = Process.Start(psi)!;
+        string? error = null;
+        bool done = false;
+        string? line;
+        while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+        {
+            if (line.StartsWith("PROGRESS ")) {
+                var parts = line.Split(' ', 3);
+                if (parts.Length >= 2 && int.TryParse(parts[1], out var pm)) progress(pm, parts.Length > 2 ? parts[2] : "");
+            }
+            else if (line == "DONE") done = true;
+            else if (line.StartsWith("ERROR ")) error = line[6..];
+        }
+        await p.WaitForExitAsync();
+        if (_import == null) throw new OperationCanceledException("Import cancelled.");
+        _import = null;
+        if (error != null) throw new InvalidOperationException(error);
+        if (!done) throw new InvalidOperationException("The import stopped before it finished.");
+        SetGameDir(dest);
+    }
+
+    public static void CancelImport()
+    {
+        var p = _import;
+        _import = null;
+        try { p?.Kill(true); } catch { }
     }
 
     public static void OpenFolder(string path)
