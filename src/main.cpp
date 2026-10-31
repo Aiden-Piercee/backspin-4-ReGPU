@@ -28,6 +28,7 @@ int main(int argc, char** argv)
     std::filesystem::path gameDir = "game";
     bool explicitGameDir = false;
     bool noLauncherArg = false;
+    bool setupOnly = false; // --setup: the game's own window (import, patches), then exit; used by the TS4Launcher app
 
     for (int i = 1; i < argc; ++i)
     {
@@ -35,6 +36,10 @@ int main(int argc, char** argv)
         if (arg == "--no-launcher")
         {
             noLauncherArg = true;
+        }
+        else if (arg == "--setup")
+        {
+            setupOnly = true;
         }
         else if (arg[0] != '-')
         {
@@ -51,6 +56,12 @@ int main(int argc, char** argv)
     Ts4Settings& s = GetTs4Settings();
     if (!explicitGameDir && !s.gameDir.empty())
         gameDir = s.gameDir;
+
+    if (setupOnly)
+    {
+        RunLauncher(gameDir);
+        return 0;
+    }
 
     // Run launcher unless bypassed
     if (!noLauncherArg && !getenv("TS4_NO_LAUNCHER") && !getenv("FM2_NO_LAUNCHER") &&

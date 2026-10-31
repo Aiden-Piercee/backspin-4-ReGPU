@@ -107,3 +107,11 @@ py -3 tools\regpuctl.py threads            :: Inspect registers and call chains 
 - FFmpeg: Audio decoding components under LGPL/GPL.
 - AMD FidelityFX SDK: FSR upscaling integration under the MIT license.
 - Top Spin 4 is the property of 2K Sports and Take-Two Interactive. This project is for preservation and research purposes and requires original game assets.
+
+## TS4 launcher (WebView2)
+
+`launcher/TS4Launcher` is the ReGPU-style launcher window (Play, Graphics, Settings), after the FM2 ReGPU launcher.
+It edits `user\settings.ini` and starts `topspin4.exe --no-launcher`. Build it with
+`dotnet publish launcher\TS4Launcher -c Release -r win-x64` (needs the .NET 10 SDK) and put `TS4Launcher.exe`
+next to `topspin4.exe` or in a `launcher` folder below it. `topspin4.exe --setup` opens the built-in window for
+importing a disc and checking patches. `TS4Launcher.exe --play` starts the game without a window.

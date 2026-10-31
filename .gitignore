@@ -45,3 +45,6 @@ user/
 /tools/audiotest/logs/
 prebuilt/
 game
+
+launcher/**/bin/
+launcher/**/obj/

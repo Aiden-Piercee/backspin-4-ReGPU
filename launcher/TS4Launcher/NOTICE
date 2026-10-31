@@ -1,0 +1,3 @@
+The launcher's design, window host (Web.cs), message bridge and page layout follow the FM2 ReGPU launcher
+(https://github.com/zer0ducksgiven/Forza-Motorsport-2-ReGPU), MIT License, Copyright (c) 2026 zer0ducksgiven.
+host.js is that project's, with the channel marker renamed.

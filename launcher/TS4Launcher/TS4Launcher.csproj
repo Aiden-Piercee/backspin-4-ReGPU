@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Top Spin 4 launcher: a Photino window (WebView2) showing wwwroot. Same design as the other ReGPU
+       launchers (after zer0ducksgiven/Forza-Motorsport-2-ReGPU, MIT). The page talks to Bridge.cs over the
+       window's message channel; no local server. Build: dotnet publish -c Release -r win-x64 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>TS4Launcher</AssemblyName>
+    <RootNamespace>TS4Launcher</RootNamespace>
+    <Product>Top Spin 4 ReGPU</Product>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Photino.NET" Version="4.0.16" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
