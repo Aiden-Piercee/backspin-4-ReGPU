@@ -73,6 +73,25 @@ std::filesystem::path ContentTypeDir(uint32_t type)
     return ContentDir() / t;
 }
 
+// Packages mounted by XamContentCreateEx and not yet closed: lower-case root name -> "<type>/<file>".
+// The console refuses to delete an open package.
+std::mutex g_mountMutex;
+std::unordered_map<std::string, std::string> g_mounted;
+
+std::string LowerRoot(std::string root)
+{
+    for (char& c : root)
+        c = char(tolower(uint8_t(c)));
+    return root;
+}
+
+std::string MountKey(uint32_t type, const std::string& fileName)
+{
+    char t[16];
+    snprintf(t, sizeof(t), "%08X/", type);
+    return t + fileName;
+}
+
 // Display names live beside the packages (<fileName>.title, UTF-16 LE), outside what the game sees.
 std::filesystem::path TitlePath(uint32_t type, const std::string& fileName) { return ContentTypeDir(type) / (fileName + ".title"); }
 
@@ -900,6 +919,10 @@ GUEST_EXPORT(XamContentCreateEx)
     {
         // Replace: nothing of the old package may survive (its title file is rewritten below).
         VfsRemoveLink(root + ":");
+        {
+            std::lock_guard lock(g_mountMutex);
+            g_mounted.erase(LowerRoot(root));
+        }
         std::filesystem::remove_all(dir, ec);
         existed = false;
     }
@@ -920,6 +943,10 @@ GUEST_EXPORT(XamContentCreateEx)
     const std::string device = shared ? "\\Device\\Dlc\\" + fileName
                                       : "\\Device\\Content\\" + dir.parent_path().filename().string() + "\\" + fileName;
     VfsAddLink(root + ":", device);
+    {
+        std::lock_guard lock(g_mountMutex);
+        g_mounted[LowerRoot(root)] = MountKey(contentType, fileName);
+    }
     Log("content: %s: -> %s", root.c_str(), dir.string().c_str());
     StoreIfNonNull(ctx.r7.u32, existed ? 2 : 1); // XCONTENT_OPENED_EXISTING : XCONTENT_CREATED_NEW
     // The license mask of a downloadable package (<package>.license, from its header; see
@@ -934,7 +961,12 @@ GUEST_EXPORT(XamContentCreateEx)
 
 GUEST_EXPORT(XamContentClose)
 {
-    VfsRemoveLink(GuestString(ctx.r3.u32) + ":");
+    const std::string root = GuestString(ctx.r3.u32);
+    VfsRemoveLink(root + ":");
+    {
+        std::lock_guard lock(g_mountMutex);
+        g_mounted.erase(LowerRoot(root));
+    }
     FinishUi(ctx, ctx.r4.u32);
 }
 
@@ -948,6 +980,24 @@ GUEST_EXPORT(XamContentDelete)
     if (!fileName.empty())
     {
         const uint32_t type = LoadBE32(data + 4);
+        // As on the console: a package that is still open cannot be deleted.
+        static LiveSwitch noOpenCheck("REGPU_NO_DELETE_OPEN_CHECK");
+        if (!noOpenCheck)
+        {
+            const std::string key = MountKey(type, fileName);
+            bool open = false;
+            {
+                std::lock_guard lock(g_mountMutex);
+                for (const auto& m : g_mounted)
+                    open = open || m.second == key;
+            }
+            if (open)
+            {
+                Log("content: delete of %s refused, the package is open", key.c_str());
+                FinishUi(ctx, ctx.r5.u32, 5); // ERROR_ACCESS_DENIED
+                return;
+            }
+        }
         std::filesystem::remove_all(ContentTypeDir(type) / fileName, ec);
         std::filesystem::remove(TitlePath(type, fileName), ec);
         Log("content: deleted %08X/%s (lr %08llX)", type, fileName.c_str(), ctx.lr);
