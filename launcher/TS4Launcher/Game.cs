@@ -6,19 +6,25 @@ public static class Game
 {
     public static bool Running => Process.GetProcessesByName("topspin4").Length > 0;
 
-    /// <summary>The game folder from settings.ini (game_dir), or "game" next to the exe.</summary>
-    public static string GameDir
+    /// <summary>The game_dir saved in settings.ini, if any.</summary>
+    static string? SavedGameDir()
     {
-        get
-        {
-            var ini = Path.Combine(Paths.UserDir, "settings.ini");
-            if (File.Exists(ini))
-                foreach (var l in File.ReadAllLines(ini))
-                    if (l.StartsWith("game_dir=", StringComparison.Ordinal) && l.Length > 9)
-                        return Path.GetFullPath(l[9..], Paths.GameRoot);
-            return Path.Combine(Paths.GameRoot, "game");
-        }
+        var ini = Path.Combine(Paths.UserDir, "settings.ini");
+        if (File.Exists(ini))
+            foreach (var l in File.ReadAllLines(ini))
+                if (l.StartsWith("game_dir=", StringComparison.Ordinal) && l.Length > 9)
+                    return Path.GetFullPath(l[9..], Paths.GameRoot);
+        return null;
     }
+
+    /// <summary>
+    /// The game folder from settings.ini (game_dir); else user\game when TS4_USER_DIR is set (a clean or test profile
+    /// keeps its own files); else "game" next to the exe.
+    /// </summary>
+    public static string GameDir => SavedGameDir()
+        ?? (Environment.GetEnvironmentVariable("TS4_USER_DIR") is { Length: > 0 }
+            ? Path.Combine(Paths.UserDir, "game")
+            : Path.Combine(Paths.GameRoot, "game"));
 
     public static bool FilesPresent => File.Exists(Path.Combine(GameDir, "default.xex"));
     public static bool ExePresent => File.Exists(Paths.Exe);
@@ -27,7 +33,9 @@ public static class Game
     public static void Launch()
     {
         if (!ExePresent) throw new FileNotFoundException("topspin4.exe was not found next to the launcher.");
-        if (!FilesPresent) throw new InvalidOperationException("The game files are missing. Use Import game first.");
+        if (!FilesPresent) throw new InvalidOperationException("The game files are missing. Drop the ISO or the extracted game folder on the Game tile first.");
+        // topspin4.exe reads game_dir from settings.ini; write the default location too, so both agree.
+        if (SavedGameDir() == null) SetGameDir(GameDir);
         Process.Start(new ProcessStartInfo(Paths.Exe, "--no-launcher") { WorkingDirectory = Paths.GameRoot, UseShellExecute = false });
     }
 

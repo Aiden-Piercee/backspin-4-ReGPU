@@ -92,9 +92,9 @@ function show(st) {
   $("checklist").innerHTML =
     row(st.exe, "topspin4.exe found next to the launcher", "topspin4.exe not found next to the launcher") +
     row(st.update, "Title update installed", "No title update (add or drop the package)") +
-    row(st.files, "Game files: " + st.gameDir, "Game files missing in " + st.gameDir + ". Use Import game.")
+    row(st.files, "Game files: " + shortPath(st.gameDir), "Game files missing. Drop the ISO or the extracted game folder on the Game tile.")
   $("launch").disabled = !ok || st.running
-  tileStatus("game", st.files, st.files ? "Game files found" : "Game files missing")
+  tileStatus("game", st.files, st.files ? "Game files found: " + shortPath(st.gameDir) : "Game files missing")
   tileStatus("update", st.update, st.update ? "Installed" : "Not installed")
   tileStatus("dlc", st.dlc > 0, st.dlc > 0 ? st.dlc + (st.dlc === 1 ? " package installed" : " packages installed") : "None installed")
   $("shaderInfo").textContent = st.shaders.files
@@ -103,6 +103,8 @@ function show(st) {
   $("shaders-delete").disabled = !st.shaders.files || st.running
   $("paths").innerHTML = `Install: <b>${esc(st.installDir)}</b><br>User data: <b>${esc(st.userDir)}</b><br>Game: <b>${esc(st.gameDir)}</b>`
 }
+// The last two folders of a path, so the page never prints the whole tree.
+const shortPath = (p) => { const s = p.split(/[\\/]/).filter(Boolean); return s.length > 2 ? "…\\" + s.slice(-2).join("\\") : p }
 const esc = (t) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))
 const chip = (ok, good, bad) => `<span class="chip ${ok ? "ok" : "bad"}"><span class="dot"></span>${ok ? good : bad}</span>`
 const row = (ok, good, bad) => `<div class="check ${ok ? "ok" : "bad"}"><span class="dot"></span>${esc(ok ? good : bad)}</div>`
