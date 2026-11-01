@@ -73,6 +73,25 @@ std::filesystem::path ContentTypeDir(uint32_t type)
     return ContentDir() / t;
 }
 
+// Packages mounted by XamContentCreateEx and not yet closed: lower-case root name -> "<type>/<file>".
+// The console refuses to delete an open package.
+std::mutex g_mountMutex;
+std::unordered_map<std::string, std::string> g_mounted;
+
+std::string LowerRoot(std::string root)
+{
+    for (char& c : root)
+        c = char(tolower(uint8_t(c)));
+    return root;
+}
+
+std::string MountKey(uint32_t type, const std::string& fileName)
+{
+    char t[16];
+    snprintf(t, sizeof(t), "%08X/", type);
+    return t + fileName;
+}
+
 // Display names live beside the packages (<fileName>.title, UTF-16 LE), outside what the game sees.
 std::filesystem::path TitlePath(uint32_t type, const std::string& fileName) { return ContentTypeDir(type) / (fileName + ".title"); }
 
@@ -874,13 +893,38 @@ GUEST_EXPORT(XamContentCreateEx)
     const bool shared = contentType == 2 && std::filesystem::is_directory(DlcDir() / fileName, ec);
     if (shared)
         dir = DlcDir() / fileName;
-    const bool existed = shared || std::filesystem::exists(dir, ec);
+    bool existed = shared || std::filesystem::exists(dir, ec);
     const uint32_t flags = ctx.r6.u32;
-    const uint32_t mode = flags & 0xF; // 1 create new, 2 create always, 3 open, 4 open always
-    if (!existed && mode == 3)
+    // XCONTENTFLAG dispositions, as the console's XAM treats them (the same on every title):
+    // 1 create new (fails when the package exists), 2 create always (replaces it), 3 open
+    // existing (fails when it does not), 4 open always, 5 truncate existing (replaces it, fails
+    // when it does not exist). A title that probes for a save with "create new", or rewrites one
+    // with "create always", relies on those answers; opening the existing package for every mode
+    // gave it the wrong ones. REGPU_TRACE_CONTENT=1 logs each call.
+    const uint32_t mode = flags & 0xF;
+    static LiveSwitch traceContent("REGPU_TRACE_CONTENT");
+    if (traceContent)
+        Log("content: create %s/%s flags %08X existed %d (lr %08llX)", root.c_str(), fileName.c_str(), flags, existed, ctx.lr);
+    if ((mode == 3 || mode == 5) && !existed)
     {
-        FinishUi(ctx, StackArg(ctx, 8), X_ERROR_FILE_NOT_FOUND);
+        FinishUi(ctx, StackArg(ctx, 8), 3); // ERROR_PATH_NOT_FOUND
         return;
+    }
+    if (mode == 1 && existed)
+    {
+        FinishUi(ctx, StackArg(ctx, 8), 183); // ERROR_ALREADY_EXISTS
+        return;
+    }
+    if ((mode == 2 || mode == 5) && existed && !shared)
+    {
+        // Replace: nothing of the old package may survive (its title file is rewritten below).
+        VfsRemoveLink(root + ":");
+        {
+            std::lock_guard lock(g_mountMutex);
+            g_mounted.erase(LowerRoot(root));
+        }
+        std::filesystem::remove_all(dir, ec);
+        existed = false;
     }
     if (!shared)
         std::filesystem::create_directories(dir, ec);
@@ -899,6 +943,10 @@ GUEST_EXPORT(XamContentCreateEx)
     const std::string device = shared ? "\\Device\\Dlc\\" + fileName
                                       : "\\Device\\Content\\" + dir.parent_path().filename().string() + "\\" + fileName;
     VfsAddLink(root + ":", device);
+    {
+        std::lock_guard lock(g_mountMutex);
+        g_mounted[LowerRoot(root)] = MountKey(contentType, fileName);
+    }
     Log("content: %s: -> %s", root.c_str(), dir.string().c_str());
     StoreIfNonNull(ctx.r7.u32, existed ? 2 : 1); // XCONTENT_OPENED_EXISTING : XCONTENT_CREATED_NEW
     // The license mask of a downloadable package (<package>.license, from its header; see
@@ -913,7 +961,12 @@ GUEST_EXPORT(XamContentCreateEx)
 
 GUEST_EXPORT(XamContentClose)
 {
-    VfsRemoveLink(GuestString(ctx.r3.u32) + ":");
+    const std::string root = GuestString(ctx.r3.u32);
+    VfsRemoveLink(root + ":");
+    {
+        std::lock_guard lock(g_mountMutex);
+        g_mounted.erase(LowerRoot(root));
+    }
     FinishUi(ctx, ctx.r4.u32);
 }
 
@@ -927,9 +980,29 @@ GUEST_EXPORT(XamContentDelete)
     if (!fileName.empty())
     {
         const uint32_t type = LoadBE32(data + 4);
+        // As on the console: a package that is still open cannot be deleted.
+        static LiveSwitch noOpenCheck("REGPU_NO_DELETE_OPEN_CHECK");
+        if (!noOpenCheck)
+        {
+            const std::string key = MountKey(type, fileName);
+            bool open = false;
+            {
+                std::lock_guard lock(g_mountMutex);
+                for (const auto& m : g_mounted)
+                    open = open || m.second == key;
+            }
+            if (open)
+            {
+                Log("content: delete of %s refused, the package is open", key.c_str());
+                FinishUi(ctx, ctx.r5.u32, 5); // ERROR_ACCESS_DENIED
+                return;
+            }
+        }
         std::filesystem::remove_all(ContentTypeDir(type) / fileName, ec);
         std::filesystem::remove(TitlePath(type, fileName), ec);
-        Log("content: deleted %08X/%s", type, fileName.c_str());
+        Log("content: deleted %08X/%s (lr %08llX)", type, fileName.c_str(), ctx.lr);
+        if (getenv("REGPU_TRACE_CONTENT"))
+            DumpRecentImports("XamContentDelete");
     }
     FinishUi(ctx, ctx.r5.u32);
 }
