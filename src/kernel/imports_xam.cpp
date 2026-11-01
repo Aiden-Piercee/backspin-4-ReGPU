@@ -950,7 +950,9 @@ GUEST_EXPORT(XamContentDelete)
         const uint32_t type = LoadBE32(data + 4);
         std::filesystem::remove_all(ContentTypeDir(type) / fileName, ec);
         std::filesystem::remove(TitlePath(type, fileName), ec);
-        Log("content: deleted %08X/%s", type, fileName.c_str());
+        Log("content: deleted %08X/%s (lr %08llX)", type, fileName.c_str(), ctx.lr);
+        if (getenv("REGPU_TRACE_CONTENT"))
+            DumpRecentImports("XamContentDelete");
     }
     FinishUi(ctx, ctx.r5.u32);
 }

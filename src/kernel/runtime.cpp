@@ -1,6 +1,7 @@
 #include "kernel/runtime.h"
 
 #include <chrono>
+#include <mutex>
 #include <thread>
 
 #include <intrin.h>
@@ -174,8 +175,40 @@ void CompleteOverlapped(uint32_t overlapped, uint32_t result, uint32_t extendedE
     }
 }
 
+namespace
+{
+struct RecentImport
+{
+    const char* name;
+    uint64_t lr;
+    uint32_t thread, r3, r4, r5;
+};
+constexpr unsigned kRecent = 256;
+RecentImport g_recent[kRecent];
+unsigned g_recentCount = 0;
+std::mutex g_recentMutex;
+} // namespace
+
+void DumpRecentImports(const char* why)
+{
+    std::lock_guard lock(g_recentMutex);
+    Log("recent imports before %s (oldest first):", why);
+    const unsigned n = g_recentCount < kRecent ? g_recentCount : kRecent;
+    for (unsigned i = 0; i < n; i++)
+    {
+        const RecentImport& e = g_recent[(g_recentCount - n + i) % kRecent];
+        Log("  t%u %s (lr %08llX, r3 %08X r4 %08X r5 %08X)", e.thread, e.name, (unsigned long long)e.lr, e.r3, e.r4, e.r5);
+    }
+}
+
 void TraceImport(const char* name, PPCContext& ctx)
 {
+    static const bool recent = getenv("REGPU_TRACE_CONTENT") != nullptr;
+    if (recent)
+    {
+        std::lock_guard lock(g_recentMutex);
+        g_recent[g_recentCount++ % kRecent] = { name, ctx.lr, CurrentGuestThreadId(), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32 };
+    }
     static const double after = getenv("FM2_TRACE_IMPORTS") ? atof(getenv("FM2_TRACE_IMPORTS")) : -1;
     if (after < 0)
         return;
