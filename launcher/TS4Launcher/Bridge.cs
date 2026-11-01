@@ -33,8 +33,8 @@ public sealed class Bridge
         });
     }
 
-    /// <summary>A file drag over the window: lights the page's hint and, at most every 60 ms, tells it where the pointer is.</summary>
-    void OnHover(bool on, int screenX, int screenY)
+    /// <summary>A file drag over the window (x, y: client pixels of the window that got it): lights the page's hint and, at most every 60 ms, tells it where the pointer is.</summary>
+    void OnHover(bool on, int x, int y)
     {
         if (!on)
         {
@@ -47,15 +47,13 @@ public sealed class Bridge
         var now = Environment.TickCount64;
         if (now - _lastOver < 60) return;
         _lastOver = now;
-        var (x, y) = DropTarget.ToClient(_window.WindowHandle, screenX, screenY);
         Push("over", new { x, y });
     }
 
     /// <summary>Files dropped: the page works out which tile is under the point and calls "drop".</summary>
-    void OnDropped(string[] paths, int screenX, int screenY)
+    void OnDropped(string[] paths, int x, int y)
     {
-        var (x, y) = DropTarget.ToClient(_window.WindowHandle, screenX, screenY);
-        Log.Write($"drop: received {paths.Length} path(s) at screen ({screenX},{screenY}), client ({x},{y}): {string.Join(" | ", paths)}");
+        Log.Write($"drop: received {paths.Length} path(s) at client ({x},{y}): {string.Join(" | ", paths)}");
         Push("dropped-at", new { paths, x, y });
     }
 

@@ -14,22 +14,25 @@ namespace TS4Launcher;
 [ComVisible(true)]
 public sealed class DropTarget : IDropTarget
 {
+    readonly IntPtr _hwnd;
     readonly Action<string[], int, int> _dropped;
     readonly Action<bool, int, int> _hover;
+    static int _logged;
 
-    DropTarget(Action<string[], int, int> dropped, Action<bool, int, int> hover) { _dropped = dropped; _hover = hover; }
+    // One target per window: the point of a drag is converted against the window that received it, not the
+    // top-level one (WebView2's render surface is a child whose origin differs and moves when the window does).
+    DropTarget(IntPtr hwnd, Action<string[], int, int> dropped, Action<bool, int, int> hover) { _hwnd = hwnd; _dropped = dropped; _hover = hover; }
 
     /// <summary>Takes over the drop target of the window and its child windows; logs the result of each.</summary>
     public static void Install(IntPtr window, Action<string[], int, int> dropped, Action<bool, int, int> hover)
     {
         if (window == IntPtr.Zero) { Log.Write("drop: window handle is 0"); return; }
         var ole = OleInitialize(IntPtr.Zero);
-        var target = new DropTarget(dropped, hover);
         int taken = 0, refused = 0;
         void Take(IntPtr h)
         {
             var revoke = RevokeDragDrop(h);
-            var reg = RegisterDragDrop(h, target);
+            var reg = RegisterDragDrop(h, new DropTarget(h, dropped, hover));
             if (reg == 0) taken++; else refused++;
             if (reg != 0) Log.Write($"drop: window {h:X} refused: revoke 0x{revoke:X8}, register 0x{reg:X8}");
         }
@@ -38,11 +41,17 @@ public sealed class DropTarget : IDropTarget
         Log.Write($"drop: OleInitialize 0x{ole:X8}, windows taken {taken}, refused {refused}");
     }
 
-    /// <summary>Screen coordinates to client coordinates of <paramref name="window"/>.</summary>
-    public static (int X, int Y) ToClient(IntPtr window, int x, int y)
+    /// <summary>Client coordinates (of the window that received the drag) from the OLE screen point; logs the first few.</summary>
+    (int X, int Y) ToClient(int x, int y, string what)
     {
         var p = new POINT { X = x, Y = y };
-        ScreenToClient(window, ref p);
+        ScreenToClient(_hwnd, ref p);
+        if (_logged < 12)
+        {
+            _logged++;
+            GetWindowRect(_hwnd, out var r);
+            Log.Write($"drop: {what} in window {_hwnd:X} rect ({r.Left},{r.Top})-({r.Right},{r.Bottom}): screen ({x},{y}) -> client ({p.X},{p.Y})");
+        }
         return (p.X, p.Y);
     }
 
@@ -51,11 +60,17 @@ public sealed class DropTarget : IDropTarget
     public int DragEnter(IDataObject data, int keys, POINT pt, ref int effect)
     {
         effect = HasFiles(data) ? DropEffectCopy : 0;
-        if (effect != 0) _hover(true, pt.X, pt.Y);
+        if (effect != 0) { var c = ToClient(pt.X, pt.Y, "enter"); _hover(true, c.X, c.Y); }
         return 0;
     }
 
-    public int DragOver(int keys, POINT pt, ref int effect) { effect = DropEffectCopy; _hover(true, pt.X, pt.Y); return 0; }
+    public int DragOver(int keys, POINT pt, ref int effect)
+    {
+        effect = DropEffectCopy;
+        var c = ToClient(pt.X, pt.Y, "over");
+        _hover(true, c.X, c.Y);
+        return 0;
+    }
 
     public int DragLeave() { _hover(false, 0, 0); return 0; }
 
@@ -64,7 +79,7 @@ public sealed class DropTarget : IDropTarget
         _hover(false, 0, 0);
         var paths = Paths(data);
         effect = paths.Length > 0 ? DropEffectCopy : 0;
-        if (paths.Length > 0) _dropped(paths, pt.X, pt.Y);
+        if (paths.Length > 0) { var c = ToClient(pt.X, pt.Y, "drop"); _dropped(paths, c.X, c.Y); }
         return 0;
     }
 
@@ -98,9 +113,12 @@ public sealed class DropTarget : IDropTarget
 
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT { public int Left, Top, Right, Bottom; }
 
     delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc proc, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr hwnd, ref POINT pt);
     [DllImport("ole32.dll")] static extern int OleInitialize(IntPtr reserved);
     [DllImport("ole32.dll")] static extern int RegisterDragDrop(IntPtr hwnd, IDropTarget target);
