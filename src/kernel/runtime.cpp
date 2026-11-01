@@ -107,6 +107,16 @@ void RuntimeInit(const std::filesystem::path& gameDir)
     std::filesystem::create_directories(g_contentDir, ec);
     std::filesystem::create_directories(DlcDir(), ec);
     Log("runtime: profile %s, saves in %s", GetSettings().profile.c_str(), g_contentDir.string().c_str());
+    // Vertex and index data is copied at the draw, not read in place while the GPU runs it: the title
+    // rewrites buffers it has already submitted (skinned players drew with warped heads otherwise).
+    // These are the switches "Launch Top Spin 4.bat" set; REGPU_DIRECT_FETCH=1 restores in-place reads.
+    if (!getenv("REGPU_DIRECT_FETCH"))
+    {
+        if (!getenv("REGPU_NO_DIRECT_FETCH"))
+            _putenv_s("REGPU_NO_DIRECT_FETCH", "1");
+        if (!getenv("REGPU_NO_DIRECT_INDEX"))
+            _putenv_s("REGPU_NO_DIRECT_INDEX", "1");
+    }
     PresenterInit();
     GpuInit();
     AudioInit();
