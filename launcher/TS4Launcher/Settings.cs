@@ -89,6 +89,9 @@ public static class Paths
     /// <summary>TS4_USER_DIR if set (side-by-side instances), else user\ next to the exe, as the game does.</summary>
     public static string UserDir => Environment.GetEnvironmentVariable("TS4_USER_DIR") is { Length: > 0 } d ? Path.GetFullPath(d) : Path.Combine(GameRoot, "user");
 
+    /// <summary>The console's update: device (default.xexp, ...), as src/loader.cpp reads it.</summary>
+    public static string UpdateDir => Path.Combine(UserDir, "update");
+
     static string Find()
     {
         var here = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);

@@ -50,3 +50,5 @@ input[type=range] { padding: 0; accent-color: var(--accent); }
 @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
 .bar { height: 10px; background: var(--panel-2); border-radius: 99px; overflow: hidden; margin: 8px 0; }
 #import-bar { height: 100%; width: 0; background: var(--accent); }
+#drop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(11,15,13,.86); border: 3px dashed var(--accent); font-size: 22px; font-weight: 700; pointer-events: none; }
+#drop[hidden] { display: none; }

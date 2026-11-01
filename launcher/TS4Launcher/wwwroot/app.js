@@ -13,6 +13,15 @@ host.addEventListener("message", (e) => {
     $("import-text").textContent = (m.data.pm / 10).toFixed(1) + "%  " + m.data.file
     return
   }
+  if (m.event === "dragging") { $("drop").hidden = !m.data; return }
+  if (m.event === "state") { show(m.data); return }
+  if (m.event === "dropped") {
+    const d = m.data
+    $("import-box").hidden = d.kind !== "iso" && d.kind !== "zip"
+    status({ zip: "Looking inside " + d.name + "…", folder: "Game folder set: " + d.name, iso: "Importing " + d.name + "…", isodone: "Game files ready.",
+      update: "Title update installed: " + d.name, error: d.name }[d.kind], d.kind === "error")
+    return
+  }
   const p = pending.get(m.id)
   if (!p) return
   pending.delete(m.id)
@@ -80,6 +89,7 @@ function show(st) {
     (st.running ? chip(true, "Game running", "") : "")
   $("checklist").innerHTML =
     row(st.exe, "topspin4.exe found next to the launcher", "topspin4.exe not found next to the launcher") +
+    row(st.update, "Title update installed", "No title update (add or drop the package)") +
     row(st.files, "Game files: " + st.gameDir, "Game files missing in " + st.gameDir + ". Use Import game.")
   $("launch").disabled = !ok || st.running
   $("shaderInfo").textContent = st.shaders.files
@@ -123,6 +133,11 @@ async function importWith(cmd) {
 $("import-iso").addEventListener("click", () => importWith("import.iso"))
 $("import-folder").addEventListener("click", () => importWith("import.folder"))
 $("import-cancel").addEventListener("click", () => call("import.cancel").catch(() => {}))
+$("update-add").addEventListener("click", async () => {
+  try { show(await call("update.add")); status("Title update installed.") } catch (e) { status(e.message, true) }
+})
+// Dropped files are read by the host (DropTarget.cs); here only stop the page from opening them.
+for (const t of ["dragover", "drop"]) document.addEventListener(t, (e) => e.preventDefault())
 $("shaders-delete").addEventListener("click", async () => {
   if (!confirm("Delete the shader cache? The next start recompiles shaders (a few minutes).")) return
   try { show(await call("shaders.delete")) } catch (e) { alert(e.message) }
