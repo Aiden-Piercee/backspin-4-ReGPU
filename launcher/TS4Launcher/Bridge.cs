@@ -23,7 +23,8 @@ public sealed class Bridge
             foreach (var wait in new[] { 1500, 2000, 4000, 8000 })
             {
                 await Task.Delay(wait);
-                try { DropTarget.Install(window.WindowHandle, OnDropped, over => Push("dragging", over)); } catch { }
+                // RegisterDragDrop must run on the window's own (STA) thread, not the pool thread this loop is on.
+                try { window.Invoke(() => DropTarget.Install(window.WindowHandle, OnDropped, over => Push("dragging", over))); } catch { }
             }
         });
     }
