@@ -44,10 +44,25 @@
 
     <section class="panel launch-panel">
       <div class="panel-head"><h2>Ready</h2></div>
+      <div class="tiles">
+        <button class="tile" id="tile-game" data-tile="game" data-tip="Click to choose the disc image (ISO), or drop the ISO, the extracted game folder, or a zip of either here.">
+          <span class="tile-title">Game</span>
+          <span class="tile-hint">Drop the ISO, the extracted game folder, or a zip of either</span>
+          <span class="tile-status" id="tile-game-status"></span>
+        </button>
+        <button class="tile" id="tile-update" data-tile="update" data-tip="Click to choose the title update package, or drop the package, a folder or a zip here.">
+          <span class="tile-title">Title update</span>
+          <span class="tile-hint">Drop the update package, a folder or a zip</span>
+          <span class="tile-status" id="tile-update-status"></span>
+        </button>
+        <button class="tile" id="tile-dlc" data-tile="dlc" data-tip="Click to choose DLC packages, or drop packages, a folder of them or a zip here.">
+          <span class="tile-title">DLC</span>
+          <span class="tile-hint">Drop DLC packages, a folder of them or a zip</span>
+          <span class="tile-status" id="tile-dlc-status"></span>
+        </button>
+      </div>
       <div class="checklist" id="checklist"></div>
       <div class="buttons-row">
-        <button class="ghost small" id="import-iso" data-tip="Extracts your Top Spin 4 Xbox 360 disc image (ISO) into the game folder.">Import from ISO…</button>
-        <button class="ghost small" id="update-add" data-tip="Installs the game's title update package (you can also drop it on the window).">Add title update…</button>
         <button class="ghost small" id="import-folder" data-tip="Use a folder that already has the game files (it must contain default.xex).">Use existing folder…</button>
       </div>
       <div id="import-box" hidden>
@@ -120,7 +135,7 @@
     </section>
   </main>
 
-  <div id="drop" hidden><div>Drop the game ISO, the game folder, the title update, or a zip of them here</div></div>
+  <div id="drop" hidden><div>Drop it on a tile: Game, Title update or DLC</div></div>
   <div id="tip" hidden></div>
   <script src="host.js"></script>
   <script src="app.js"></script>

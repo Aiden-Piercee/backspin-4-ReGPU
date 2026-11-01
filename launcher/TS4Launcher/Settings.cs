@@ -92,6 +92,9 @@ public static class Paths
     /// <summary>The console's update: device (default.xexp, ...), as src/loader.cpp reads it.</summary>
     public static string UpdateDir => Path.Combine(UserDir, "update");
 
+    /// <summary>Downloadable content, shared by all profiles: dlc\&lt;package&gt; (src/kernel/imports_xam.cpp).</summary>
+    public static string DlcDir => Path.Combine(UserDir, "dlc");
+
     static string Find()
     {
         var here = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);

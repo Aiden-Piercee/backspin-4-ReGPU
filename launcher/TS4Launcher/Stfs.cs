@@ -166,4 +166,58 @@ public sealed class Stfs : IDisposable
         if (System.IO.Directory.Exists(dest)) System.IO.Directory.Delete(dest, true);
         System.IO.Directory.Move(tmp, dest);
     }
+
+    /// <summary>Unpacks any package: one with default.xexp is the title update (user\update), anything else is DLC. Returns "update" or "dlc".</summary>
+    public static string Install(string package, string name)
+    {
+        using var s = new Stfs(package);
+        var tmp = Unpack(s);
+        if (File.Exists(Path.Combine(tmp, "default.xexp")))
+        {
+            if (System.IO.Directory.Exists(Paths.UpdateDir)) System.IO.Directory.Delete(Paths.UpdateDir, true);
+            System.IO.Directory.Move(tmp, Paths.UpdateDir);
+            return "update";
+        }
+        FinishDlc(s, tmp, name);
+        return "dlc";
+    }
+
+    /// <summary>Installs a downloadable-content package as user\dlc\&lt;name&gt; with &lt;name&gt;.title and &lt;name&gt;.license beside it, as the game reads them.</summary>
+    public static void InstallDlc(string package, string name)
+    {
+        using var s = new Stfs(package);
+        FinishDlc(s, Unpack(s), name);
+    }
+
+    static string Unpack(Stfs s)
+    {
+        var tmp = Path.Combine(Paths.UserDir, "tmp", "pkg");
+        if (System.IO.Directory.Exists(tmp)) System.IO.Directory.Delete(tmp, true);
+        System.IO.Directory.CreateDirectory(tmp);
+        s.Extract(tmp);
+        return tmp;
+    }
+
+    static void FinishDlc(Stfs s, string tmp, string name)
+    {
+        name = DlcName(name);
+        Log.Write($"dlc: {name}: title id {s.TitleId:X8}, content type {s.ContentType:X8}, license {s.LicenseMask:X8}, \"{s.DisplayName}\"");
+        var dlc = Paths.DlcDir;
+        System.IO.Directory.CreateDirectory(dlc);
+        var dest = Path.Combine(dlc, name);
+        if (System.IO.Directory.Exists(dest)) System.IO.Directory.Delete(dest, true);
+        System.IO.Directory.Move(tmp, dest);
+        File.WriteAllBytes(dest + ".title", Encoding.Unicode.GetBytes(s.DisplayName.Length > 0 ? s.DisplayName : name));
+        File.WriteAllText(dest + ".license", s.LicenseMask.ToString("X8") + "\r\n");
+    }
+
+    /// <summary>A folder name for a package: the file name without extension, unsafe characters replaced, at most 42 characters.</summary>
+    public static string DlcName(string fileName)
+    {
+        var n = Path.GetFileNameWithoutExtension(fileName);
+        foreach (var c in Path.GetInvalidFileNameChars()) n = n.Replace(c, '_');
+        n = n.Trim().TrimEnd('.');
+        if (n.Length > 42) n = n[..42];
+        return n.Length == 0 ? "dlc" : n;
+    }
 }

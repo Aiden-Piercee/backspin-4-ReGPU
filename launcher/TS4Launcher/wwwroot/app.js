@@ -13,13 +13,15 @@ host.addEventListener("message", (e) => {
     $("import-text").textContent = (m.data.pm / 10).toFixed(1) + "%  " + m.data.file
     return
   }
-  if (m.event === "dragging") { $("drop").hidden = !m.data; return }
+  if (m.event === "dragging") { $("drop").hidden = !m.data; if (!m.data) hot(null); return }
+  if (m.event === "over") { hot(m.data.x < 0 ? null : tileAt(m.data.x, m.data.y)); return }
+  if (m.event === "dropped-at") { dropped(m.data); return }
   if (m.event === "state") { show(m.data); return }
   if (m.event === "dropped") {
     const d = m.data
     $("import-box").hidden = d.kind !== "iso" && d.kind !== "zip"
     status({ zip: "Looking inside " + d.name + "…", folder: "Game folder set: " + d.name, iso: "Importing " + d.name + "…", isodone: "Game files ready.",
-      update: "Title update installed: " + d.name, error: d.name }[d.kind], d.kind === "error")
+      update: "Title update installed: " + d.name, dlc: "DLC installed: " + d.name }[d.kind])
     return
   }
   const p = pending.get(m.id)
@@ -92,6 +94,9 @@ function show(st) {
     row(st.update, "Title update installed", "No title update (add or drop the package)") +
     row(st.files, "Game files: " + st.gameDir, "Game files missing in " + st.gameDir + ". Use Import game.")
   $("launch").disabled = !ok || st.running
+  tileStatus("game", st.files, st.files ? "Game files found" : "Game files missing")
+  tileStatus("update", st.update, st.update ? "Installed" : "Not installed")
+  tileStatus("dlc", st.dlc > 0, st.dlc > 0 ? st.dlc + (st.dlc === 1 ? " package installed" : " packages installed") : "None installed")
   $("shaderInfo").textContent = st.shaders.files
     ? `${st.shaders.files} files, ${(st.shaders.bytes / 1048576).toFixed(1)} MB`
     : "Empty."
@@ -120,22 +125,42 @@ $("launch").addEventListener("click", async () => {
   try { await call("launch", { settings: collect() }); status("Game started.") } catch (e) { status(e.message, true) }
   refresh()
 })
-async function importWith(cmd) {
-  for (const id of ["import-iso", "import-folder"]) $(id).disabled = true
+const tiles = ["game", "update", "dlc"]
+const tileStatus = (name, ok, text) => { const s = $("tile-" + name + "-status"); s.textContent = text; s.className = "tile-status " + (ok ? "ok" : "bad") }
+const busy = (on) => { for (const id of ["tile-game", "tile-update", "tile-dlc", "import-folder"]) $(id).disabled = on }
+// Runs a bridge command that installs something (a picker or a drop) and shows the result.
+async function install(cmd, args) {
+  busy(true)
+  status("Working…")
   try {
-    show(await call(cmd))
-    status(state.files ? "Game files ready." : "")
+    show(await call(cmd, args))
+    if ($("status").textContent === "Working…") status("")
   } catch (e) { status(e.message, true) }
   $("import-box").hidden = true
-  for (const id of ["import-iso", "import-folder"]) $(id).disabled = false
+  busy(false)
   refresh()
 }
-$("import-iso").addEventListener("click", () => importWith("import.iso"))
-$("import-folder").addEventListener("click", () => importWith("import.folder"))
+$("tile-game").addEventListener("click", () => install("import.iso"))
+$("tile-update").addEventListener("click", () => install("update.add"))
+$("tile-dlc").addEventListener("click", () => install("dlc.add"))
+$("import-folder").addEventListener("click", () => install("import.folder"))
 $("import-cancel").addEventListener("click", () => call("import.cancel").catch(() => {}))
-$("update-add").addEventListener("click", async () => {
-  try { show(await call("update.add")); status("Title update installed.") } catch (e) { status(e.message, true) }
-})
+// A file drag over the window (DropTarget.cs reports it): the tile under the pointer lights up, and a drop goes to it.
+// The host sends device pixels; "auto" means outside the tiles, where the host works out what was dropped.
+function tileAt(x, y) {
+  const r = window.devicePixelRatio || 1
+  const el = document.elementFromPoint(x / r, y / r)
+  const t = el && el.closest("[data-tile]")
+  return t && !t.disabled ? t.dataset.tile : "auto"
+}
+function hot(name) { for (const t of tiles) $("tile-" + t).classList.toggle("hot", t === name) }
+function dropped(d) {
+  const tile = tileAt(d.x, d.y)
+  hot(null)
+  $("drop").hidden = true
+  if ($("tile-game").disabled) { status("Something is still being installed. Wait for it to finish.", true); return }
+  install("drop", { tile, paths: d.paths })
+}
 // Dropped files are read by the host (DropTarget.cs); here only stop the page from opening them.
 for (const t of ["dragover", "drop"]) document.addEventListener(t, (e) => e.preventDefault())
 $("shaders-delete").addEventListener("click", async () => {

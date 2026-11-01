@@ -63,13 +63,34 @@ public static class Zips
             {
                 e.ExtractToFile(file, true);
                 if (!Stfs.IsPackage(file)) continue;
-                Stfs.InstallTitleUpdate(file, Paths.UpdateDir);
-                return "update";
+                return Stfs.Install(file, e.Name);
             }
             finally { try { File.Delete(file); } catch { } }
         }
 
         throw new InvalidOperationException("That zip has no title update (default.xexp or an update package), no game folder (default.xex) and no .iso.");
+    }
+
+    /// <summary>Installs every Xbox 360 package inside a zip as DLC; returns how many.</summary>
+    public static int InstallDlc(string zipPath)
+    {
+        using var z = ZipFile.OpenRead(zipPath);
+        int n = 0;
+        var tmp = Path.Combine(Paths.UserDir, "tmp");
+        Directory.CreateDirectory(tmp);
+        foreach (var e in z.Entries.Where(e => e.Name.Length > 0 && e.Length >= 0x2000))
+        {
+            var file = Path.Combine(tmp, "dlc.bin");
+            try
+            {
+                e.ExtractToFile(file, true);
+                if (!Stfs.IsPackage(file)) continue;
+                Stfs.InstallDlc(file, e.Name);
+                n++;
+            }
+            finally { try { File.Delete(file); } catch { } }
+        }
+        return n;
     }
 
     /// <summary>Unpacks the entries under <paramref name="prefix"/> into dest, without the prefix; names are checked to stay inside dest.</summary>
