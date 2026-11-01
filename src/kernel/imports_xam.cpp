@@ -874,13 +874,34 @@ GUEST_EXPORT(XamContentCreateEx)
     const bool shared = contentType == 2 && std::filesystem::is_directory(DlcDir() / fileName, ec);
     if (shared)
         dir = DlcDir() / fileName;
-    const bool existed = shared || std::filesystem::exists(dir, ec);
+    bool existed = shared || std::filesystem::exists(dir, ec);
     const uint32_t flags = ctx.r6.u32;
-    const uint32_t mode = flags & 0xF; // 1 create new, 2 create always, 3 open, 4 open always
-    if (!existed && mode == 3)
+    // XCONTENTFLAG dispositions, as the console's XAM treats them (the same on every title):
+    // 1 create new (fails when the package exists), 2 create always (replaces it), 3 open
+    // existing (fails when it does not), 4 open always, 5 truncate existing (replaces it, fails
+    // when it does not exist). A title that probes for a save with "create new", or rewrites one
+    // with "create always", relies on those answers; opening the existing package for every mode
+    // gave it the wrong ones. REGPU_TRACE_CONTENT=1 logs each call.
+    const uint32_t mode = flags & 0xF;
+    static LiveSwitch traceContent("REGPU_TRACE_CONTENT");
+    if (traceContent)
+        Log("content: create %s/%s flags %08X existed %d (lr %08llX)", root.c_str(), fileName.c_str(), flags, existed, ctx.lr);
+    if ((mode == 3 || mode == 5) && !existed)
     {
-        FinishUi(ctx, StackArg(ctx, 8), X_ERROR_FILE_NOT_FOUND);
+        FinishUi(ctx, StackArg(ctx, 8), 3); // ERROR_PATH_NOT_FOUND
         return;
+    }
+    if (mode == 1 && existed)
+    {
+        FinishUi(ctx, StackArg(ctx, 8), 183); // ERROR_ALREADY_EXISTS
+        return;
+    }
+    if ((mode == 2 || mode == 5) && existed && !shared)
+    {
+        // Replace: nothing of the old package may survive (its title file is rewritten below).
+        VfsRemoveLink(root + ":");
+        std::filesystem::remove_all(dir, ec);
+        existed = false;
     }
     if (!shared)
         std::filesystem::create_directories(dir, ec);
