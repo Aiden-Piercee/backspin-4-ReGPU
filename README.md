@@ -111,7 +111,16 @@ py -3 tools\regpuctl.py threads            :: Inspect registers and call chains 
 ## TS4 launcher (WebView2)
 
 `launcher/TS4Launcher` is the ReGPU-style launcher window (Play, Graphics, Settings), after the FM2 ReGPU launcher.
-It edits `user\settings.ini` and starts `topspin4.exe --no-launcher`. Build it with
-`dotnet publish launcher\TS4Launcher -c Release -r win-x64` (needs the .NET 10 SDK) and put `TS4Launcher.exe`
-next to `topspin4.exe` or in a `launcher` folder below it. `topspin4.exe --setup` opens the built-in window for
-importing a disc and checking patches. `TS4Launcher.exe --play` starts the game without a window.
+Game files, the title update and DLC are installed inside the launcher: on the Play tab, drop your files on the
+**Game**, **Title update** or **DLC** tile (or click a tile to browse).
+
+- **Game**: the disc image (`.iso`), the extracted game folder (it must contain `default.xex`), or a `.zip` of either.
+  An ISO is extracted into the game folder (`game` next to the exe, or `user\game` when `TS4_USER_DIR` is set).
+- **Title update**: the update package, a folder containing `default.xexp`, or a `.zip` of either. It is installed to `user\update`.
+- **DLC**: downloaded content packages, a folder of them, or a `.zip`. Each package is installed to `user\dlc`.
+
+A drop outside the tiles is detected automatically (ISO, game folder, update or DLC package, zip). The launcher
+saves your settings to `user\settings.ini` and starts `topspin4.exe --no-launcher`; `TS4Launcher.exe --play`
+starts the game without a window. Build it with `dotnet publish launcher\TS4Launcher -c Release -r win-x64`
+(needs the .NET 10 SDK) and put `TS4Launcher.exe` next to `topspin4.exe` or in a `launcher` folder below it.
+`topspin4.exe --setup` still opens the game's own import window as a fallback.

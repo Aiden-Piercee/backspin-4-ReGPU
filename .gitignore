@@ -48,3 +48,5 @@ game
 
 launcher/**/bin/
 launcher/**/obj/
+_backups/
+_cleanprofile/
