@@ -275,8 +275,11 @@ public sealed class Bridge
         }
     }
 
+    public static readonly string Version = typeof(Bridge).Assembly.GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "?";
+
     static object State() => new
     {
+        version = Version,
         settings = GameSettings.Load(),
         running = Game.Running,
         exe = Game.ExePresent,

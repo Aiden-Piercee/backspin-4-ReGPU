@@ -16,6 +16,7 @@
 #include "ts4_settings.h"
 #include "launcher.h"
 #include "launcher_import.h"
+#include "version.h"
 
 void CrashHandlerInit();
 void GpuLogState();
@@ -26,6 +27,7 @@ int main(int argc, char** argv)
         SetThreadDesktop(desk);
 
     CrashHandlerInit();
+    Log("topspin4: version %s (%s)", TS4_VERSION, TS4_GIT);
 
     // --import <iso> <folder>: extract an Xbox 360 disc image without any window, for TS4Launcher.
     // Prints "PROGRESS <permille> <file>", then "DONE" or "ERROR <text>" (one line each) and exits.

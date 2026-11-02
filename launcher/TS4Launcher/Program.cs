@@ -15,7 +15,7 @@ internal static class Program
         using var single = new Mutex(true, "TS4ReGPU.Launcher", out bool first);
         if (!first) return 0;
         Photino.NET.PhotinoWindow window;
-        try { window = Web.Create("Top Spin 4 ReGPU", "index.html", 1180, 760, 900, 640); }
+        try { window = Web.Create("Top Spin 4 ReGPU v" + Bridge.Version, "index.html", 1180, 760, 900, 640); }
         catch (Exception ex)
         {
             Error("The launcher needs Microsoft Edge WebView2 (part of Windows 11; a free download for Windows 10).\n\n" + ex.Message);

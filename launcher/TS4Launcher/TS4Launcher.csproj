@@ -11,6 +11,8 @@
     <AssemblyName>TS4Launcher</AssemblyName>
     <RootNamespace>TS4Launcher</RootNamespace>
     <Product>Top Spin 4 ReGPU</Product>
+    <!-- the repo's VERSION file is the only place the release number is set -->
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\VERSION').Trim())</Version>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>

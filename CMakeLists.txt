@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
-project(topspin4 C CXX)
+# Release version: the VERSION file (one line, e.g. 0.1.0) is the only place to change it.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" TS4_VERSION LIMIT_COUNT 1)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE TS4_GIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT TS4_GIT)
+    set(TS4_GIT "unknown")
+endif()
+
+project(topspin4 VERSION ${TS4_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -104,7 +113,7 @@ target_include_directories(topspin4 PRIVATE
     thirdparty/XenonRecomp/XenonUtils
     thirdparty/XenonRecomp/thirdparty/simde
 )
-target_compile_definitions(topspin4 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(topspin4 PRIVATE TS4_VERSION="${TS4_VERSION}" TS4_GIT="${TS4_GIT}" NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(topspin4 PRIVATE /EHsc -msse4.1 -fno-strict-aliasing -gline-tables-only ${PPC_FORCE_INCLUDE})
 target_link_options(topspin4 PRIVATE /STACK:0x1000000 /DEBUG)
 

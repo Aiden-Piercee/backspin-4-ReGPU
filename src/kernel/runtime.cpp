@@ -15,6 +15,7 @@
 #include "render/presenter.h"
 #include "settings.h"
 #include "user_dir.h"
+#include "version.h"
 
 namespace
 {
@@ -86,6 +87,7 @@ void RuntimeInit(const std::filesystem::path& gameDir)
     GetSettings().maxFps = 1000;
     // Side-by-side test instances: REGPU_WINDOW_TITLE names the window, REGPU_OUTPUT_SIZE=WxH
     // sets its size (the window position: REGPU_MONITOR, REGPU_WINDOW_SLOT in presenter.cpp).
+    GetSettings().windowTitle = L"Top Spin 4 ReGPU v" TS4_VERSION_W;
     if (const wchar_t* title = _wgetenv(L"REGPU_WINDOW_TITLE"); title && *title)
         GetSettings().windowTitle = title;
     if (unsigned w = 0, h = 0; getenv("REGPU_OUTPUT_SIZE") && sscanf(getenv("REGPU_OUTPUT_SIZE"), "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180)

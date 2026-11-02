@@ -85,6 +85,8 @@ function show(st) {
     fill(st.settings)
   }
   const ok = st.exe && st.files
+  const tagEl = document.querySelector(".brand .tag")
+  if (tagEl && st.version) tagEl.textContent = "Native PC port · v" + st.version
   $("chips").innerHTML =
     chip(st.exe, "Game program", "topspin4.exe missing") +
     chip(st.files, "Game files", "Game files missing") +
