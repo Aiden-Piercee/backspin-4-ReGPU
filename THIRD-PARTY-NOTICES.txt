@@ -1,0 +1,45 @@
+THIRD-PARTY NOTICES
+===================
+
+This project (Top Spin 4 ReGPU port) is MIT licensed (see LICENSE) for the code written for it.
+It includes or links the third-party components below, each under its own licence.
+No game files are included. You need your own copy of the game.
+
+Source code for everything in the built program is public:
+  https://github.com/Aiden-Piercee/backspin-4-ReGPU
+
+Notice about the built program (topspin4.exe)
+---------------------------------------------
+The built topspin4.exe links the GPL-licensed PowerPC disassembler (ppc-dis.c, below) through
+XenonUtils, and uses the LGPL libraries below. Because of the GPL part, a topspin4.exe you receive
+is distributed under the terms of the GNU General Public License, version 2 or later. The complete
+corresponding source is the repository linked above, at the commit named in the release.
+
+Components
+----------
+1. XenonRecomp / XenonUtils / XenonAnalyse  - MIT, Copyright (c) 2025 hedge-dev and contributors
+   thirdparty/XenonRecomp/LICENSE.md
+   This copy has local changes in XenonRecomp/recompiler.cpp (jump-table handling, vcmpbfp128).
+
+2. ppc-dis.c PowerPC disassembler (GNU binutils) - GPL v2 or later,
+   Copyright Free Software Foundation, Inc.
+   thirdparty/XenonRecomp/thirdparty/disasm/  (licence text: COPYING.GPL-2 in that folder)
+
+3. libmspack (LZX decompression, lzxd.c) - GNU LGPL v2.1, Copyright (C) 2003-2023 Stuart Caie
+   thirdparty/XenonRecomp/thirdparty/libmspack/libmspack/COPYING.LIB
+   (cabextract, also in that folder, is GPL v2 or later; it is not built.)
+
+4. simde - MIT, Copyright (c) 2017 Evan Nemerson     (thirdparty/XenonRecomp/thirdparty/simde/COPYING)
+5. fmt - MIT                                          (thirdparty/XenonRecomp/thirdparty/fmt/LICENSE)
+6. toml++ - MIT                                       (thirdparty/XenonRecomp/thirdparty/tomlplusplus/LICENSE)
+7. xxHash - BSD 2-clause                              (thirdparty/XenonRecomp/thirdparty/xxHash/LICENSE)
+8. tiny-AES-c - public domain (Unlicense)             (thirdparty/XenonRecomp/thirdparty/tiny-AES-c/unlicense.txt)
+9. TinySHA1 - permissive (ISC-style) notice in the file header
+   (thirdparty/XenonRecomp/thirdparty/TinySHA1/TinySHA1.hpp)
+10. ReGPU - the Xbox 360 GPU layer this port is built on, by zer0ducksgiven (MIT; see LICENSE).
+11. FFmpeg - audio decoding, linked as a library, LGPL v2.1 or later (GPL for some builds). Not stored
+    in this repository; its notice ships in release packages. https://ffmpeg.org/legal.html
+12. AMD FidelityFX SDK (FSR upscaling) - MIT.
+13. Launcher (launcher/TS4Launcher) - see launcher/TS4Launcher/NOTICE.
+
+Top Spin 4 is the property of 2K Sports and Take-Two Interactive. Not affiliated with them.
