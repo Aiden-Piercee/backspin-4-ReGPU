@@ -101,7 +101,7 @@ py -3 tools\regpuctl.py threads            :: Inspect registers and call chains 
 ## Credits and Licenses
 
 - XenonRecomp: Static PowerPC recompiler developed by hedge-dev.
-- ReGPU: Direct3D 12 Xenos GPU implementation developed by Scott (Welshgamer).
+- ReGPU: Direct3D 12 Xenos GPU implementation developed by zer0ducksgiven
 - [topspin4-decomp](https://github.com/g-guthrie/topspin4-decomp): Research and decompilation analysis for Top Spin 4.
 - Xenia Project: Groundbreaking reverse engineering and research on Xbox 360 architecture and the Xenos GPU.
 - FFmpeg: Audio decoding components under LGPL/GPL.
